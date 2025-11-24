@@ -97,6 +97,10 @@ public:
 	IPhysicsCollisionSet *FindCollisionSet( unsigned int id ) override;
 	void DestroyAllCollisionSets() override;
 
+#if GAME_GMOD
+	bool IsValidPhysicsObject( IPhysicsObject* pObject ) override;
+#endif
+
 public:
 	static JoltPhysicsInterface &GetInstance() { return s_PhysicsInterface; }
 	JPH::TempAllocator *GetTempAllocator() { return m_pTempAllocator; }

@@ -172,6 +172,10 @@ public:
 
 	void DestroyCollideOnDeadObjectFlush( CPhysCollide* ) override_portal2;
 
+#if GAME_GMOD
+	void SetGModObjectEventHandler( IGModPhysicsObjectEvent *pGModObjectEvent ) override;
+#endif
+
 public:
 	JPH::PhysicsSystem* GetPhysicsSystem() { return &m_PhysicsSystem; }
 
@@ -180,6 +184,12 @@ public:
 	JoltPhysicsContactListener* GetContactListener() { return &m_ContactListener; }
 
 	IPhysicsConstraintEvent* GetConstraintEvents() { return m_pConstraintListener; }
+
+	IPhysicsObjectEvent* GetObjectEvents() { return m_pObjectEvents; }
+
+#if GAME_GMOD
+	IGModPhysicsObjectEvent* GetGModObjectEvents() { return m_pGModObjectEvents; }
+#endif
 
 	void NotifyConstraintDisabled( JoltPhysicsConstraint* pConstraint );
 
@@ -243,6 +253,12 @@ private:
 
 	JoltPhysicsContactListener m_ContactListener;
 	IPhysicsConstraintEvent *m_pConstraintListener = nullptr;
+
+	IPhysicsObjectEvent *m_pObjectEvents = nullptr;
+
+#if GAME_GMOD
+	IGModPhysicsObjectEvent *m_pGModObjectEvents = nullptr;
+#endif
 
 	bool m_EnableConstraintNotify = false;
 

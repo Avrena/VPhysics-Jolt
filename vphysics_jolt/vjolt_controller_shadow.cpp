@@ -157,7 +157,7 @@ void JoltPhysicsShadowController::OnPreSimulate( float flDeltaTime )
 
 	VJoltAssertMsg( m_pObject->GetBody()->GetMotionType() == JPH::EMotionType::Kinematic, "Shadow controllers must be kinematic!" );
 
-	JPH::BodyInterface &bodyInterface = m_pObject->GetEnvironment()->GetPhysicsSystem()->GetBodyInterfaceNoLock();
+	JPH::BodyInterface &bodyInterface = m_pObject->GetJoltEnvironment()->GetPhysicsSystem()->GetBodyInterfaceNoLock();
 	if ( m_secondsToArrival > 0.0f )
 		bodyInterface.MoveKinematic( m_pObject->GetBodyID(), m_targetPosition, m_targetRotation, m_secondsToArrival );
 	else

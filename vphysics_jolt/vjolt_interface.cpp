@@ -38,6 +38,11 @@ DEFINE_LOGGING_CHANNEL_NO_TAGS( LOG_JoltInternal, "Jolt" );
 JoltPhysicsInterface JoltPhysicsInterface::s_PhysicsInterface;
 EXPOSE_SINGLE_INTERFACE_GLOBALVAR( JoltPhysicsInterface, IPhysics, VPHYSICS_INTERFACE_VERSION, JoltPhysicsInterface::GetInstance() );
 
+#if GAME_GMOD
+typedef JoltPhysicsInterface JoltPhysicsInterfaceGMod; // To avoid g_Create[...]_reg collision
+EXPOSE_SINGLE_INTERFACE_GLOBALVAR( JoltPhysicsInterfaceGMod, IPhysics, VPHYSICS_INTERFACE_VERSION_GMOD, JoltPhysicsInterface::GetInstance() );
+#endif
+
 //-------------------------------------------------------------------------------------------------
 
 // Slart:
@@ -189,6 +194,14 @@ void JoltPhysicsInterface::DestroyAllCollisionSets()
 {
 	m_CollisionSets.clear();
 }
+
+#if GAME_GMOD
+extern bool IsValidPhyiscsObject( IPhysicsObject* pObject );
+bool JoltPhysicsInterface::IsValidPhysicsObject( IPhysicsObject* pObject )
+{
+	return ::IsValidPhyiscsObject;
+}
+#endif
 
 //-------------------------------------------------------------------------------------------------
 

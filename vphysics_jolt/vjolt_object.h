@@ -13,6 +13,7 @@ class JoltPhysicsShadowController;
 class JoltPhysicsFluidController;
 class JoltPhysicsEnvironment;
 class JoltPhysicsObject;
+class IPhysicsEnvironment;
 
 #if defined( GAME_CSGO_OR_NEWER )
 using IPhysicsObjectInterface = IPredictedPhysicsObject;
@@ -154,8 +155,17 @@ public:
 	void SetErrorDelta_Position( const Vector& vPosition ) override_csgo {}
 	void SetErrorDelta_Velocity( const Vector& vVelocity ) override_csgo {}
 
+#if GAME_GMOD
+	float GetBuoyancyRatio() const override;
+
+	int GetLuaReference() const override { return m_nLuaReference; }
+	void SetLuaReference( int nLuaReference ) override { m_nLuaReference = nLuaReference; }
+
+	virtual IPhysicsEnvironment *GetEnvironment() override;
+#endif
+
 public:
-	JoltPhysicsEnvironment *GetEnvironment() { return m_pEnvironment; }
+	JoltPhysicsEnvironment *GetJoltEnvironment() { return m_pEnvironment; }
 
 	JPH::BodyID GetBodyID() { return m_pBody->GetID(); }
 	JPH::Body *GetBody() { return m_pBody; }
@@ -179,7 +189,9 @@ public:
 	void CalculateBuoyancy();
 
 	float GetMaterialDensity() const;
+#if !GAME_GMOD // moved up for gmod.
 	float GetBuoyancyRatio() const;
+#endif
 	float GetVolume() const { return m_flVolume; }
 
 	bool IsControlledByGame() const;
@@ -243,6 +255,10 @@ private:
 	// instead of calling GetGameData().
 	void *m_pGameData = nullptr;
 	const char *m_pName = "NoName";
+
+#if GAME_GMOD
+	int m_nLuaReference = -1;
+#endif
 
 	uint16 m_gameFlags = 0;
 	uint16 m_gameIndex = 0;

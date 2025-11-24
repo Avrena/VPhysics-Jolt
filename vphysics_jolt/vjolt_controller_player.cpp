@@ -205,15 +205,15 @@ bool JoltPhysicsPlayerController::WasFrozen()
 
 bool JoltPhysicsPlayerController::OnContactValidate( const JPH::CharacterVirtual* inCharacter, const JPH::BodyID& inBodyID2, const JPH::SubShapeID& inSubShapeID2 )
 {
-	JPH::Body *pOtherBody = m_pObject->GetEnvironment()->GetPhysicsSystem()->GetBodyLockInterfaceNoLock().TryGetBody( inBodyID2 );
+	JPH::Body *pOtherBody = m_pObject->GetJoltEnvironment()->GetPhysicsSystem()->GetBodyLockInterfaceNoLock().TryGetBody( inBodyID2 );
 	JoltPhysicsObject* pOtherObject = reinterpret_cast< JoltPhysicsObject* >( pOtherBody->GetUserData() );
-	JoltPhysicsContactListener *pListener = m_pObject->GetEnvironment()->GetContactListener();
+	JoltPhysicsContactListener *pListener = m_pObject->GetJoltEnvironment()->GetContactListener();
 	return pListener->ShouldCollide( m_pObject, pOtherObject );
 }
 
 void JoltPhysicsPlayerController::OnContactAdded( const JPH::CharacterVirtual* inCharacter, const JPH::BodyID& inBodyID2, const JPH::SubShapeID& inSubShapeID2, JPH::RVec3Arg inContactPosition, JPH::Vec3Arg inContactNormal, JPH::CharacterContactSettings& ioSettings )
 {
-	JoltPhysicsContactListener *pListener = m_pObject->GetEnvironment()->GetContactListener();
+	JoltPhysicsContactListener *pListener = m_pObject->GetJoltEnvironment()->GetContactListener();
 	( void )pListener;
 }
 
@@ -224,7 +224,7 @@ static void CheckCollision( JoltPhysicsObject *pObject, JPH::CollideShapeCollect
 	if ( !pObject->IsCollisionEnabled() ) 
 	    return;
 	
-	JPH::PhysicsSystem *pSystem = pObject->GetEnvironment()->GetPhysicsSystem();
+	JPH::PhysicsSystem *pSystem = pObject->GetJoltEnvironment()->GetPhysicsSystem();
 
 	if ( !pObject->IsCollisionEnabled() )
 		return;
@@ -277,7 +277,7 @@ public:
 				return false;
 		}
 
-		if ( !pObject->GetEnvironment()->GetContactListener()->ShouldCollide( m_pSelfObject, pObject ) )
+		if ( !pObject->GetJoltEnvironment()->GetContactListener()->ShouldCollide( m_pSelfObject, pObject ) )
 			return false;
 
 		return true;
@@ -557,7 +557,7 @@ void JoltPhysicsPlayerController::SetObjectInternal( JoltPhysicsObject *pObject 
 		settings->mMaxSlopeAngle               = JPH::DegreesToRadians( 45.573 );
 		settings->mEnhancedInternalEdgeRemoval = true;
 
-		m_pCharacter = new JPH::Character( settings, m_pObject->GetBody()->GetPosition(), JPH::Quat::sIdentity(), m_pObject->GetBody()->GetUserData(), m_pObject->GetEnvironment()->GetPhysicsSystem() );
+		m_pCharacter = new JPH::Character( settings, m_pObject->GetBody()->GetPosition(), JPH::Quat::sIdentity(), m_pObject->GetBody()->GetUserData(), m_pObject->GetJoltEnvironment()->GetPhysicsSystem() );
 		m_pCharacter->AddToPhysicsSystem();
 	}
 }

@@ -21,6 +21,37 @@
 
 //-------------------------------------------------------------------------------------------------
 
+#if GAME_GMOD
+// RaphaelIT7: Gmod needs to keep track of which objects exists
+// This is because Lua stores a pointer to the IPhysicsObject
+// And it cannot invalidate all pointers since
+// first - there can be multiple userdatas that keep a pointer stored
+// secondly - an IPhysicsObject can be deleted outside of Lua
+
+// NOTE: Perferably gmod will use the SetLuaReference function
+// & use the IGModPhysicsObjectEvent::ObjectDestroyed callback to invalidate references instead
+static std::unordered_set< JoltPhysicsObject* > g_pObjects;
+inline void RegisterPhysicsObject( JoltPhysicsObject* pObject )
+{
+	auto it = g_pObjects.find(pObject);
+	if (it == g_pObjects.end())
+		g_pObjects.insert(pObject);
+}
+
+inline void UnregisterPhysicsObject( JoltPhysicsObject* pObject )
+{
+	auto it = g_pObjects.find(pObject);
+	if (it != g_pObjects.end())
+		g_pObjects.erase(it);
+}
+
+bool IsValidPhyiscsObject( IPhysicsObject* pObject ) // for vjolt_interface.cpp to use
+{
+	JoltPhysicsObject *pJoltObject = static_cast< JoltPhysicsObject * >( pObject );
+	return g_pObjects.find( pJoltObject ) != g_pObjects.end();
+}
+#endif
+
 JoltPhysicsObject::JoltPhysicsObject( JPH::Body *pBody, JoltPhysicsEnvironment *pEnvironment, bool bStatic, int nMaterialIndex, const objectparams_t *pParams )
 	: m_pBody( pBody )
 	, m_pEnvironment( pEnvironment )
@@ -71,10 +102,24 @@ JoltPhysicsObject::JoltPhysicsObject( JPH::Body *pBody, JoltPhysicsEnvironment *
 	, m_pGameData( pGameData )
 {
 	RestoreObjectState( recorder );
+
+#if GAME_GMOD
+	if (m_pEnvironment->GetGModObjectEvents())
+		m_pEnvironment->GetGModObjectEvents()->ObjectCreated( this );
+
+	RegisterPhysicsObject( this );
+#endif
 }
 
 JoltPhysicsObject::~JoltPhysicsObject()
 {
+#if GAME_GMOD
+	UnregisterPhysicsObject( this );
+
+	if (m_pEnvironment->GetGModObjectEvents())
+		m_pEnvironment->GetGModObjectEvents()->ObjectDestroyed( this );
+#endif
+
 	RemoveShadowController();
 
 	// Josh:
@@ -1345,3 +1390,10 @@ void JoltPhysicsObject::RecomputeDrag()
 	Vector vDragMins, vDragMaxs;
 	JoltPhysicsCollision::GetInstance().CollideGetAABB( &vDragMins, &vDragMaxs, GetCollide(), vec3_origin, vec3_angle );
 }
+
+#if GAME_GMOD
+IPhysicsEnvironment *JoltPhysicsObject::GetEnvironment()
+{
+	return m_pEnvironment;
+}
+#endif

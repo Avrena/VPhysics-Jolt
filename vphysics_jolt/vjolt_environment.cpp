@@ -919,7 +919,7 @@ void JoltPhysicsEnvironment::SetCollisionEventHandler( IPhysicsCollisionEvent *p
 
 void JoltPhysicsEnvironment::SetObjectEventHandler( IPhysicsObjectEvent *pObjectEvents )
 {
-	Log_Stub( LOG_VJolt );
+	m_pObjectEvents = pObjectEvents;
 }
 
 void JoltPhysicsEnvironment::SetConstraintEventHandler( IPhysicsConstraintEvent *pConstraintEvents )
@@ -1504,6 +1504,15 @@ void JoltPhysicsEnvironment::DestroyCollideOnDeadObjectFlush( CPhysCollide *pCol
 	// Otherwise, just delete it now.
 	JoltPhysicsCollision::GetInstance().DestroyCollide( pCollide );
 }
+
+//-------------------------------------------------------------------------------------------------
+
+#if GAME_GMOD
+void JoltPhysicsEnvironment::SetGModObjectEventHandler( IGModPhysicsObjectEvent *pGModObjectEvent )
+{
+	m_pGModObjectEvents = pGModObjectEvent;
+}
+#endif
 
 //-------------------------------------------------------------------------------------------------
 

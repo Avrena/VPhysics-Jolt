@@ -49,6 +49,10 @@ public:
 	IPhysicsCollisionSet *FindCollisionSet( unsigned int id ) override;
 	void DestroyAllCollisionSets() override;
 
+#if GAME_GMOD
+	bool IsValidPhysicsObject( IPhysicsObject* pObject ) override;
+#endif
+
 public:
 	static PhysicsWrapper &GetInstance() { return s_PhysicsInterface; }
 
@@ -212,3 +216,10 @@ void PhysicsWrapper::DestroyAllCollisionSets()
 {
 	m_pActualPhysicsInterface->DestroyAllCollisionSets();
 }
+
+#if GAME_GMOD
+bool PhysicsWrapper::IsValidPhysicsObject( IPhysicsObject* pObject )
+{
+	return m_pActualPhysicsInterface->IsValidPhysicsObject( pObject );
+}
+#endif
