@@ -100,6 +100,7 @@ $Project "$PROJNAME"
 		$File	"vjolt_parse.cpp"
 		$File	"vjolt_querymodel.cpp"
 		$File	"vjolt_surfaceprops.cpp"
+		$File	"vjolt_listener_contact.cpp"
 	}
 
 	$Folder	"Header Files"

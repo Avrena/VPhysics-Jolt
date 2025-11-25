@@ -388,7 +388,7 @@ private:
 
 	static uint32 GetThreadId()
 	{
-		static thread_local uint32 s_ThreadId = ~0u;
+		extern thread_local uint32 s_ThreadId;
 		static std::atomic< uint32 > s_ThreadCtr = { 0u };
 		if ( s_ThreadId == ~0u )
 			s_ThreadId = s_ThreadCtr++;
