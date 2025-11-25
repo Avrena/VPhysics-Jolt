@@ -59,7 +59,7 @@
 #include "tier1/tier1.h"
 #include "tier1/strtools.h"
 #include "tier1/interface.h"
-#ifndef GAME_L4D2_OR_NEWER
+#if !defined(GAME_L4D2_OR_NEWER) || defined(GAME_GMOD)
 #include "tier1/KeyValues.h"
 #else
 #include "tier1/keyvalues.h"
