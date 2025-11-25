@@ -51,6 +51,7 @@ EXPOSE_SINGLE_INTERFACE_GLOBALVAR( JoltPhysicsInterfaceGMod, IPhysics, VPHYSICS_
 // which use the Valve overrides in memoverride.cpp.
 // For Desolation we use mi-malloc rather than dlmalloc, that also gets built into the statically
 // linked releases for gmod (along with all of tier0 and vstdlib).
+// RaphaelIT7: It should always be kept in mind that inBlock for Free/AlignedFree can be NULL as per jolt docs! (though the engine already checks for null)
 namespace JPH {
 
 	void *Allocate( size_t inSize )
