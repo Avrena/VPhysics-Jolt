@@ -36,7 +36,7 @@
 //-------------------------------------------------------------------------------------------------
 
 // This is the max amount of rigid bodies that you can add to the physics system. If you try to add more you'll get an error.
-static constexpr uint kMaxBodies = 16384;
+static constexpr uint kMaxBodies = 65536;
 
 // This determines how many mutexes to allocate to protect rigid bodies from concurrent access. Set it to 0 for the default settings.
 static constexpr uint kNumBodyMutexes = 0;
