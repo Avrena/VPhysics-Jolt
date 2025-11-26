@@ -77,6 +77,7 @@ void JoltCollisionQuery::GetTriangleVerts( int convexIndex, int triangleIndex, V
 
 void JoltCollisionQuery::SetTriangleVerts( int convexIndex, int triangleIndex, const Vector *verts )
 {
+	// RaphaelIT7: Did this ever work? - a vphysics comment says it doesn't.
 	Log_Stub( LOG_VJolt );
 }
 

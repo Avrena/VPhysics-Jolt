@@ -246,6 +246,9 @@ public:
 
 	void UpdateLayer();
 	void RecomputeDrag();
+
+	// Should be called BEFORE UpdateLayer inside EnableMotion!
+	void RecaulculateFixedConstraintPartnerMovable();
 private:
 	void UpdateMaterialProperties();
 
@@ -267,6 +270,7 @@ private:
 
 	bool m_bStatic = false;
 	bool m_bPinned = false;
+	bool m_bConstraintPinned = false;
 
 	int m_materialIndex = 0;
 	uint m_contents = CONTENTS_SOLID;
