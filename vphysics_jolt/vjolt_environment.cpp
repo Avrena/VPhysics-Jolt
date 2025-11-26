@@ -1121,7 +1121,7 @@ void JoltPhysicsEnvironment::PreRestore( const physprerestoreparams_t &params )
 {
 	m_SaveRestorePointerMap.clear();
 
-#if defined(GAME_GMOD_64X)
+#if defined( GAME_GMOD_64X )
 	Log_Stub( LOG_VJolt ); // Raphael (ToDo): Figure out what happens here normally... I should check the SDK again and see if we have the previous structure used by all other branches.
 #else
 	for ( int i = 0; i < params.recreatedObjectCount; i++ )
@@ -1625,7 +1625,7 @@ void JoltPhysicsEnvironment::HandleDebugDumpingEnvironment( void *pReturnAddress
 	s_bShouldDumpEnvironmentServer = false;
 }
 
-#if defined(GAME_GMOD_64X)
+#if defined( GAME_GMOD_64X )
 // NOTE: physprerestoreparams_t was named to physpresaverestoreparams_t though we kept the original for now.
 void JoltPhysicsEnvironment::PreSave(const physprerestoreparams_t& params)
 {

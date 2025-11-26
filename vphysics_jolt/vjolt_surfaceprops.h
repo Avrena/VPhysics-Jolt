@@ -47,7 +47,7 @@ public:
 
 	ISaveRestoreOps		*GetMaterialIndexDataOps() const override_portal2;
 
-#if !defined(GAME_GMOD_64X)
+#if !defined( GAME_GMOD_64X )
 	// GMod-specific internal gubbins that was exposed in the public interface.
 	void				*GetIVPMaterial( int nIndex ) override_gmod;
 	int					GetIVPMaterialIndex( const void *pMaterial ) const override_gmod;

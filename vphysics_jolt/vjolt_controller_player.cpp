@@ -292,7 +292,7 @@ uint32 JoltPhysicsPlayerController::GetContactState( uint16 nGameFlags )
 {
 	// This does not seem to affect much, we should aspire to have our physics be as 1:1 to brush collisions as possible anyway
 	// Raphael: I was getting stuck at the slightest touch with this enabled on 64x Gmod.
-#if defined(GAME_PORTAL2_OR_NEWER) && !defined(GAME_GMOD)
+#if defined( GAME_PORTAL2_OR_NEWER ) && !defined( GAME_GMOD )
 	if ( !m_pObject->IsCollisionEnabled() )
 		return 0;
 

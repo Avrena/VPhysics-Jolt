@@ -32,7 +32,7 @@ public:
 
 	bool WasFrozen() override;
 
-#if defined(GAME_GMOD_64X)
+#if defined( GAME_GMOD_64X )
 	uint32 GetContactState( uint16 nGameFlags ); // Not a virtual in Gmod.
 #else
 	uint32 GetContactState( uint16 nGameFlags ) override_portal2;

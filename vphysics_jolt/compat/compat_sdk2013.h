@@ -7,7 +7,7 @@
 #include "Color.h"
 #include "branch_overrides.h"
 
-#if !defined(GAME_GMOD_64X)
+#if !defined( GAME_GMOD_64X )
 enum LoggingSeverity_t
 {
     LS_MESSAGE = 0,
@@ -49,7 +49,7 @@ struct LoggingChannelInfo_t
 #define Log_Error( Channel, Fmt, ... ) InternalMsg( Channel, Fmt, ##__VA_ARGS__ )
 
 // Unused, just makes stuff cleaner to not have ifdef spam.
-#if !defined(GAME_GMOD_64X)
+#if !defined( GAME_GMOD_64X )
 enum collisionhints
 {
     COLLISION_HINT_DEBRIS = 0x0001,
