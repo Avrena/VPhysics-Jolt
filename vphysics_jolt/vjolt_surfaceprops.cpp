@@ -302,6 +302,7 @@ int JoltPhysicsSurfaceProps::RemapIVPMaterialIndex( int nIndex ) const
 
 	return m_MaterialPropMap[ nIndex ];
 }
+#endif
 
 const char *JoltPhysicsSurfaceProps::GetReservedMaterialName( int nMaterialIndex ) const
 {
@@ -310,7 +311,6 @@ const char *JoltPhysicsSurfaceProps::GetReservedMaterialName( int nMaterialIndex
 
 	return NULL;
 }
-#endif
 
 //-------------------------------------------------------------------------------------------------
 

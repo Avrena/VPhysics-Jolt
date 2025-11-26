@@ -54,6 +54,8 @@ public:
 	void				*GetIVPManager( void ) override_gmod;
 	int					RemapIVPMaterialIndex( int nIndex ) const override_gmod;
 	const char 			*GetReservedMaterialName( int nMaterialIndex ) const override_gmod;
+#else
+	const char 			*GetReservedMaterialName( int nMaterialIndex ) const; // Needed by ParseSurfaceData to setup the ShadowMaterial
 #endif
 
 public:
