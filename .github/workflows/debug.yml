@@ -7,7 +7,8 @@ jobs:
     runs-on: ubuntu-latest
     container: debian:bullseye
     name: "GMod Dedicated Server"
-
+    env:
+        PTERODACTYL_SERVER: ${{ secrets.PTERODACTYL_SERVER }}
     steps:
     - name: Install Dependencies
       run: |
@@ -43,7 +44,16 @@ jobs:
         zip -r vphysics_jolt_gmod_dedicated_linux32.zip bin
         mv vphysics_jolt_gmod_dedicated_linux32.zip ../../
 
+    # RaphaelIT7: GLuaTets setup - we replace vphysics in the bin/ folder
+    - name: Create GLuaTest file
+      run: |
+        cd gmod/game
+        tar -czf vphysics_jolt_gmod_gluatest.tar.gz bin/
+        mv vphysics_jolt_gmod_gluatest.tar.gz ../../
+
+    # RaphaelIT7: I use pterodactyl for testing, though it's not required for any forks / will not run for them.
     - name: Deploy to pterodactyl
+      if: env.PTERODACTYL_SERVER != ''
       run: |
         curl "https://${{secrets.PTERODACTYL_URL}}/api/client/servers/${{secrets.PTERODACTYL_SERVER}}/files/write?file=%2Fvphysics_jolt_gmod_dedicated_linux32.zip" \
               -H 'Accept: application/json' \
@@ -57,3 +67,28 @@ jobs:
               -H 'Authorization: Bearer ${{secrets.PTERODACTYL_KEY}}' \
               -X POST \
               -d '{"root": "/", "file": "vphysics_jolt_gmod_dedicated_linux32.zip"}' 
+
+    - uses: actions/upload-artifact@v4
+      name: "Upload GLuaTest build"
+      with:
+        name: vphysics_jolt_gmod_gluatest
+        path: vphysics_jolt_gmod_gluatest.tar.gz
+        compression-level: 9
+        retention-days: 1
+
+    # holylib_v2 - This build should not depend on exact return float values.
+  tests:
+    name: "Test 32x branches"
+    needs: linux-gmod-dedicated
+    uses: RaphaelIT7/GLuaTest/.github/workflows/run_tests.yml@holylib_v2
+    strategy:
+      matrix:
+        branch:
+          - public
+          - dev
+          - prerelease
+    with:
+      download-artifact: "vphysics_jolt_gmod_gluatest"
+      no-checkout: "true"
+      branch: ${{ matrix.branch }}
+      timeout: "4"
