@@ -145,7 +145,7 @@ void JoltPhysicsInterface::DestroyEnvironment( IPhysicsEnvironment *pEnvironment
 		g_pPhysicsEnvironments.erase(it);
 	}
 
-	delete pJoltEnvironment;
+	// delete pJoltEnvironment;
 }
 
 IPhysicsEnvironment *JoltPhysicsInterface::GetActiveEnvironmentByIndex( int index )
