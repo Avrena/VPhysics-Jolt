@@ -50,6 +50,9 @@
 #include <fstream>
 #include <unordered_map>
 #include <unordered_set>
+// RaphaelIT7: I don't know why it hates me for trying to include it, but here we go
+#include "ankerl/unordered_dense.h"
+#include <mutex>
 
 // Mathlib
 #include "mathlib/mathlib.h"

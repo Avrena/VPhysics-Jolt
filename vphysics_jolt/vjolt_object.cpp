@@ -361,6 +361,8 @@ void JoltPhysicsObject::RecheckContactPoints( bool bSearchForNewContacts /*= fal
 {
 	JPH::BodyInterface& bodyInterface = m_pPhysicsSystem->GetBodyInterfaceNoLock();
 	bodyInterface.InvalidateContactCache( GetBodyID() );
+
+	GetJoltEnvironment()->GetContactListener()->InvalidShouldCollideCache( this );
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -1302,7 +1304,7 @@ void JoltPhysicsObject::AdvanceContactImpulseTick()
 }
 
 // Caller MUST hold m_LastContactImpulsesLock.
-static inline void TickStampedClear( uint32 &nLastTick, std::unordered_map< JoltPhysicsObject *, JoltPhysicsObject::ContactImpulse > &map )
+static inline void TickStampedClear( uint32 &nLastTick, ankerl::unordered_dense::map< JoltPhysicsObject *, JoltPhysicsObject::ContactImpulse > &map )
 {
 	const uint32 nNow = g_nContactImpulseTick.load( std::memory_order_relaxed );
 	if ( nLastTick != nNow )

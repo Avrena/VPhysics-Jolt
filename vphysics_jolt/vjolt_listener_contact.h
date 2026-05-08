@@ -3,6 +3,7 @@
 
 #include "vjolt_controller_fluid.h"
 #include "vjolt_surfaceprops.h"
+#include "ankerl/unordered_dense.h"
 
 #include <Jolt/Physics/Collision/EstimateCollisionResponse.h>
 
@@ -165,6 +166,7 @@ public:
 		float flNormalImpulseSum = 0.0f;
 		for ( const JPH::CollisionEstimationResult::Impulse &imp : result.mImpulses )
 			flNormalImpulseSum += imp.mContactImpulse;
+
 		pObject1->AccumulateContactNormalImpulse( pObject2, flNormalImpulseSum );
 		pObject2->AccumulateContactNormalImpulse( pObject1, flNormalImpulseSum );
 
@@ -280,6 +282,25 @@ public:
 		m_EndTouchEvents.EmplaceBack( uThreadId, JoltPhysicsCollisionInfo( pObject1, pObject2 ) );
 	}
 
+	static inline uint64_t MakeCacheKey(JoltPhysicsObject *pObject0, JoltPhysicsObject *pObject1)
+	{
+		uint32_t keyA = pObject0->GetBodyID().GetIndexAndSequenceNumber();
+		uint32_t keyB = pObject1->GetBodyID().GetIndexAndSequenceNumber();
+		if (keyA > keyB)
+			std::swap(keyA, keyB);
+
+		return (uint64_t(keyA) << 32) | keyB;
+	}
+
+	// RaphaelIT7: ToDo, let's maybe not nuke the entire cache?
+	void InvalidShouldCollideCache( JoltPhysicsObject *pObject0 )
+	{
+		(void)pObject0; // Unused for now.
+
+		std::unique_lock<std::shared_mutex> mapLock( m_ShouldCollideCacheLock );
+		m_ShouldCollideCache.clear();
+	}
+
 	bool ShouldCollide( JoltPhysicsObject *pObject0, JoltPhysicsObject *pObject1 )
 	{
 		VJoltAssert( pObject0 != pObject1 );
@@ -302,11 +323,37 @@ public:
 		if ( !PreEmptGameShouldCollide( pObject0, pObject1 ) )
 			return false;
 
+		// RaphaelIT7:
+		// Let's check the cache
+		// We cache it to prevent expensive locks as ShouldCollide is not thread safe (In GMod it can call back to lua)
+		uint64_t nCacheKey = MakeCacheKey( pObject0, pObject1 );
+		{
+			std::shared_lock<std::shared_mutex> lock( m_ShouldCollideCacheLock );
+			auto it = m_ShouldCollideCache.find( nCacheKey );
+			if ( it != m_ShouldCollideCache.end() )
+				return it->second;
+		}
+
 		// Actually ask the game now, locking both bodies so they cannot have
 		// concurrent ShouldCollide calls.
 		//JoltPhysicsObjectPairLock lock( pObject0->GetCollisionTestLock(), pObject1->GetCollisionTestLock() );
 		std::unique_lock lock( m_ShouldCollideLock );
-		return m_pGameSolver->ShouldCollide( pObject0, pObject1, pObject0->GetGameData(), pObject1->GetGameData() );
+
+		// RaphaelIT7: We check again since a thread may have done the work for us
+		{
+			// We must lock due to InvalidShouldCollideCache (Though it probably should never be called from outside while Simulating?)
+			std::shared_lock<std::shared_mutex> lock( m_ShouldCollideCacheLock );
+			auto it = m_ShouldCollideCache.find( nCacheKey );
+			if ( it != m_ShouldCollideCache.end() )
+				return it->second;
+		}
+
+		bool bCollide = m_pGameSolver->ShouldCollide( pObject0, pObject1, pObject0->GetGameData(), pObject1->GetGameData() );
+
+		std::unique_lock<std::shared_mutex> mapLock( m_ShouldCollideCacheLock );
+		m_ShouldCollideCache[ nCacheKey ] = bCollide;
+
+		return bCollide;
 	}
 
 	bool PreEmptGameShouldCollide( JoltPhysicsObject *pObject0, JoltPhysicsObject *pObject1 )
@@ -507,6 +554,8 @@ private:
 	IPhysicsCollisionSolver *m_pGameSolver = nullptr;
 
 	std::mutex m_ShouldCollideLock;
+	std::shared_mutex m_ShouldCollideCacheLock;
+	ankerl::unordered_dense::map< uint64_t, bool > m_ShouldCollideCache;
 
 	class JoltPhysicsCollisionInfo
 	{

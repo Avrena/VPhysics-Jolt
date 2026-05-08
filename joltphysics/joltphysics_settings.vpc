@@ -10,7 +10,8 @@ $Configuration
 	{
 		$AdditionalIncludeDirectories	"$BASE;$SRCDIR\vphysics_jolt\joltphysics\src"
 
-		$PreprocessorDefinitions		"$BASE;JPH_DISABLE_CUSTOM_ALLOCATOR;JPH_DEBUG_RENDERER"
+		$PreprocessorDefinitions		"$BASE;JPH_DEBUG_RENDERER" [$GAME_GMOD]
+		$PreprocessorDefinitions		"$BASE;JPH_DEBUG_RENDERER;JPH_DISABLE_CUSTOM_ALLOCATOR" [!$GAME_GMOD]
 
 		// Feature test stuff for the AVX2 build
 		$PreprocessorDefinitions		"$BASE;JPH_USE_SSE4_1;JPH_USE_SSE4_2;JPH_USE_AVX;JPH_USE_AVX2;JPH_USE_LZCNT;JPH_USE_TZCNT;JPH_USE_F16C;JPH_USE_FMADD"	[$VOLT_AVX2]
@@ -31,7 +32,7 @@ $Configuration "Debug"
 {
 	$Compiler
 	{
-		$PreprocessorDefinitions		"$BASE;JPH_ENABLE_ASSERTS"
+		$PreprocessorDefinitions		"$BASE;JPH_ENABLE_ASSERTS;JPH_DISABLE_CUSTOM_ALLOCATOR"
 		//$PreprocessorDefinitions		"$BASE;JPH_PROFILE_ENABLED"
 	}
 }

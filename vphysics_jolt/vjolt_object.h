@@ -6,9 +6,6 @@
 
 #pragma once
 
-#include <mutex>
-#include <unordered_map>
-
 class IPredictedPhysicsObject;
 
 class IJoltObjectDestroyedListener;
@@ -335,14 +332,16 @@ public:
 	// drop the previous tick's impulse map before adding new entries.
 	static void AdvanceContactImpulseTick();
 
+	// Both of these are called from OnContactPersisted and must perform well
 	void AccumulateContactNormalImpulse( JoltPhysicsObject *pOther, float flImpulse );
 	void AccumulateContactFrictionEnergy( JoltPhysicsObject *pOther, float flEnergy );
+
 	float GetLastContactNormalImpulse( JoltPhysicsObject *pOther ) const;
 	float GetLastContactFrictionEnergy( JoltPhysicsObject *pOther ) const;
 	void ClearContactImpulsesFor( JoltPhysicsObject *pOther );
 private:
-	std::unordered_map< JoltPhysicsObject *, ContactImpulse > m_LastContactImpulses;
-	mutable std::mutex m_LastContactImpulsesLock;
+	ankerl::unordered_dense::map< JoltPhysicsObject *, ContactImpulse > m_LastContactImpulses;
+	mutable std::mutex m_LastContactImpulsesLock; // Not a shared_mutex since it rarely / almost never happens that it's accessed simultaneously
 	uint32 m_nLastImpulseTick = 0;   // Stamp used to lazily clear per-tick.
 
 	// Shadow variables

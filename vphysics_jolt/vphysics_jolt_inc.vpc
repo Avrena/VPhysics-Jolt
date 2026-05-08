@@ -121,6 +121,11 @@ $Project "$PROJNAME"
 			$File	"compat\branch_overrides.h"
 			$File	"compat\compat_sdk2013.h"
 		}
+
+		$Folder "ankerl"
+		{
+			$File	"ankerl\unordered_dense.h"
+		}
 		
 		$File	"vjolt_callstack.h"
 		$File	"vjolt_collide.h"
