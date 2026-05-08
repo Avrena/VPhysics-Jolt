@@ -82,7 +82,9 @@ jobs:
         & "${Env:COMSPEC}" /s /c "`"${Env:VSDEVCMD}`" -arch=x86 -host_arch=x64 -no_logo && set" `
           | % { , ($_ -Split '=', 2) } `
           | % { [System.Environment]::SetEnvironmentVariable($_[0], $_[1]) }
-        .\fix_registry.bat
+        if (Test-Path ".\fix_registry.bat") {
+          & ".\fix_registry.bat"
+        }
         .\createjoltprojects.bat ${{ matrix.arch }}
         devenv jolt.sln /upgrade
         msbuild jolt.sln /nodeReuse:false /t:Rebuild /p:Configuration=Release /p:Platform=${{ matrix.vscodeArch }} /m /v:minimal
@@ -99,7 +101,7 @@ jobs:
       with:
         upload_url: ${{ needs.release_draft.outputs.upload_url }}
         asset_path: vphysics_jolt_${{ matrix.branch }}_win${{ matrix.arch }}.zip
-        asset_name: vphysics_jolt_${{ matrix.branch }}_win${{ matrix.arch }}
+        asset_name: vphysics_jolt_${{ matrix.branch }}_win${{ matrix.arch }}.zip
         asset_content_type: application/octet-stream
 
   linux:
@@ -149,7 +151,9 @@ jobs:
       working-directory: ${{ matrix.branch }}/src
       run: |
         chmod +x createjoltprojects.sh
-        chmod +x devtools/bin/vpc_linux
+        if [ -f "devtools/bin/vpc_linux" ]; then
+          chmod +x devtools/bin/vpc_linux
+        fi
         chmod +x devtools/bin/vpc
         chmod +x devtools/gendbg.sh
         ./createjoltprojects.sh ${{ matrix.arch }}
@@ -172,7 +176,7 @@ jobs:
       with:
         upload_url: ${{ needs.release_draft.outputs.upload_url }}
         asset_path: vphysics_jolt_${{ matrix.branch }}_linux${{ matrix.arch }}.zip
-        asset_name: vphysics_jolt_${{ matrix.branch }}_linux${{ matrix.arch }}
+        asset_name: vphysics_jolt_${{ matrix.branch }}_linux${{ matrix.arch }}.zip
         asset_content_type: application/octet-stream
 
   linux-gmod-dedicated:
@@ -208,8 +212,14 @@ jobs:
     - name: Build GCC x86
       working-directory: gmod/src
       run: |
+        if [ "${{ matrix.arch }}" = "64" ]; then
+          rm -f devtools/bin/vpc_linux
+          mv devtools/bin/vpc_linux64 devtools/bin/vpc_linux
+        fi
         chmod +x createjoltprojects_server.sh
-        chmod +x devtools/bin/vpc_linux
+        if [ -f "devtools/bin/vpc_linux" ]; then
+          chmod +x devtools/bin/vpc_linux
+        fi
         chmod +x devtools/bin/vpc
         chmod +x devtools/gendbg.sh
         ./createjoltprojects_server.sh ${{ matrix.arch }}
@@ -232,5 +242,5 @@ jobs:
       with:
         upload_url: ${{ needs.release_draft.outputs.upload_url }}
         asset_path: vphysics_jolt_gmod_dedicated_linux${{ matrix.arch }}.zip
-        asset_name: vphysics_jolt_gmod_dedicated_linux${{ matrix.arch }}
+        asset_name: vphysics_jolt_gmod_dedicated_linux${{ matrix.arch }}.zip
         asset_content_type: application/octet-stream

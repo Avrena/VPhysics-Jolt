@@ -59,7 +59,9 @@ jobs:
         & "${Env:COMSPEC}" /s /c "`"${Env:VSDEVCMD}`" -arch=x86 -host_arch=x64 -no_logo && set" `
           | % { , ($_ -Split '=', 2) } `
           | % { [System.Environment]::SetEnvironmentVariable($_[0], $_[1]) }
-        .\fix_registry.bat
+        if (Test-Path ".\fix_registry.bat") {
+          & ".\fix_registry.bat"
+        }
         .\createjoltprojects.bat ${{ matrix.arch }}
         devenv jolt.sln /upgrade
         msbuild jolt.sln /nodeReuse:false /t:Rebuild /p:Configuration=Release /p:Platform=${{ matrix.vscodeArch }} /m /v:minimal
@@ -67,7 +69,7 @@ jobs:
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: vphysics_jolt_${{ matrix.branch }}_win${{ matrix.arch }}
+        name: vphysics_jolt_${{ matrix.branch }}_win${{ matrix.arch }}.zip
         path: ${{ matrix.branch }}/game
         if-no-files-found: error
 
@@ -116,7 +118,9 @@ jobs:
       working-directory: ${{ matrix.branch }}/src
       run: |
         chmod +x createjoltprojects.sh
-        chmod +x devtools/bin/vpc_linux
+        if [ -f "devtools/bin/vpc_linux" ]; then
+          chmod +x devtools/bin/vpc_linux
+        fi
         chmod +x devtools/bin/vpc
         chmod +x devtools/gendbg.sh
         ./createjoltprojects.sh ${{ matrix.arch }}
@@ -129,7 +133,7 @@ jobs:
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: vphysics_jolt_${{ matrix.branch }}_linux${{ matrix.arch }}
+        name: vphysics_jolt_${{ matrix.branch }}_linux${{ matrix.arch }}.zip
         path: ${{ matrix.branch }}/game
         if-no-files-found: error
 
@@ -163,8 +167,14 @@ jobs:
     - name: Build GCC x86
       working-directory: gmod/src
       run: |
+        if [ "${{ matrix.arch }}" = "64" ]; then
+          rm -f devtools/bin/vpc_linux
+          mv devtools/bin/vpc_linux64 devtools/bin/vpc_linux
+        fi
         chmod +x createjoltprojects_server.sh
-        chmod +x devtools/bin/vpc_linux
+        if [ -f "devtools/bin/vpc_linux" ]; then
+          chmod +x devtools/bin/vpc_linux
+        fi
         chmod +x devtools/bin/vpc
         chmod +x devtools/gendbg.sh
         ./createjoltprojects_server.sh ${{ matrix.arch }}
@@ -177,6 +187,6 @@ jobs:
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: vphysics_jolt_gmod_dedicated_linux${{ matrix.arch }}
+        name: vphysics_jolt_gmod_dedicated_linux${{ matrix.arch }}.zip
         path: gmod/game
         if-no-files-found: error
