@@ -55,7 +55,8 @@ static ConVar vjolt_linearcast( "vjolt_linearcast", "1", FCVAR_NONE, "Whether bo
 static ConVar vjolt_enhanced_inactive_edge_detection( "vjolt_enhanced_inactive_edge_detection", "1", FCVAR_NONE, "Whether bodies will be created with enhanced inactive edge detection (only takes effect after map restart)." );
 static ConVar vjolt_initial_simulation( "vjolt_initial_simulation", "0", FCVAR_NONE, "Whether to pre-settle physics objects on map load." );
 
-static ConVar vjolt_substeps( "vjolt_substeps", "1", FCVAR_NONE, "Number of substeps to perform.", true, 0.0f, true, 8.0f );
+// RaphaelIT7: Setting it to 0 crashes Jolt, so let's limit it to a minimum of 1
+static ConVar vjolt_substeps( "vjolt_substeps", "1", FCVAR_NONE, "Number of substeps to perform.", true, 1.0f, true, 8.0f );
 
 static ConVar vjolt_velocity_steps( "vjolt_velocity_steps", "10", FCVAR_NONE, "Number of velocity steps to perform.", true, 0.0f, true, 64.0f );
 static ConVar vjolt_position_steps( "vjolt_position_steps", "2", FCVAR_NONE, "Number of velocity steps to perform.", true, 0.0f, true, 64.0f );
