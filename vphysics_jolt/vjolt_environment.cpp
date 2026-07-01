@@ -995,19 +995,27 @@ void JoltPhysicsEnvironment::GetActiveObjects( IPhysicsObject **pOutputObjectLis
 
 const IPhysicsObject **JoltPhysicsEnvironment::GetObjectList( int *pOutputObjectCount ) const
 {
-	m_PhysicsSystem.GetBodies( m_CachedBodies );
+	// Only rebuild when the body set changes. GetNumBodies() is O(1); m_bObjectListDirty is set on
+	// every RemoveBody() so a same-frame balanced add+remove (equal count) still forces a rebuild.
+	const unsigned int nCurBodyCount = m_PhysicsSystem.GetNumBodies();
+	if ( m_bObjectListDirty || nCurBodyCount != m_nCachedObjectListBodyCount )
+	{
+		m_PhysicsSystem.GetBodies( m_CachedBodies );
 
-	const int nCount = int ( m_CachedBodies.size() );
+		const int nCount = int ( m_CachedBodies.size() );
+		m_CachedObjects.resize( nCount );
+		for ( int i = 0; i < nCount; i++ )
+		{
+			JPH::Body *pBody = m_PhysicsSystem.GetBodyLockInterfaceNoLock().TryGetBody( m_CachedBodies[ i ] );
+			m_CachedObjects[ i ] = reinterpret_cast< IPhysicsObject * >( pBody->GetUserData() );
+		}
+
+		m_nCachedObjectListBodyCount = nCurBodyCount;
+		m_bObjectListDirty = false;
+	}
 
 	if ( pOutputObjectCount )
-		*pOutputObjectCount = nCount;
-
-	m_CachedObjects.resize( nCount );
-	for ( int i = 0; i < nCount; i++ )
-	{
-		JPH::Body *pBody = m_PhysicsSystem.GetBodyLockInterfaceNoLock().TryGetBody( m_CachedBodies[ i ] );
-		m_CachedObjects[ i ] = reinterpret_cast< IPhysicsObject * >( pBody->GetUserData() );
-	}
+		*pOutputObjectCount = int( m_CachedObjects.size() );
 
 	return m_CachedObjects.data();
 }
@@ -1019,6 +1027,7 @@ bool JoltPhysicsEnvironment::TransferObject( IPhysicsObject *pObject, IPhysicsEn
 
 	JPH::BodyInterface &bodyInterface = m_PhysicsSystem.GetBodyInterfaceNoLock();
 	bodyInterface.RemoveBody( pJoltObject->GetBodyID() );
+	m_bObjectListDirty = true;
 
 	pJoltEnv->ObjectTransferHandOver( pJoltObject );
 	pJoltObject->UpdateEnvironment( pJoltEnv );
@@ -1574,6 +1583,7 @@ void JoltPhysicsEnvironment::RemoveBodyAndDeleteObject( JoltPhysicsObject *pObje
 {
 	JPH::BodyInterface &bodyInterface = m_PhysicsSystem.GetBodyInterfaceNoLock();
 	bodyInterface.RemoveBody( pObject->GetBodyID() );
+	m_bObjectListDirty = true;
 	delete pObject;
 }
 

@@ -233,6 +233,12 @@ private:
 	// For GetObjectList
 	mutable JPH::BodyIDVector m_CachedBodies;
 	mutable std::vector< const IPhysicsObject * > m_CachedObjects;
+	// GetObjectList() cache validity: the body-count check catches add/remove; the dirty flag (set
+	// on every RemoveBody) also catches a same-frame balanced add+remove. GMod calls GetObjectList()
+	// via IsPhysicsObjectValid() on EVERY Lua PhysObj access, so this avoids an O(n) rebuild + heap
+	// alloc per call (the dominant cost on physobj-heavy servers vs. stock IVP's O(1) list).
+	mutable unsigned int m_nCachedObjectListBodyCount = ~0u;
+	mutable bool m_bObjectListDirty = true;
 
 	// For GetActiveObjectCount and GetActiveObjects
 	mutable JPH::BodyIDVector m_CachedActiveBodies;
