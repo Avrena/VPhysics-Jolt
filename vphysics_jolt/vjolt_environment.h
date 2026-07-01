@@ -202,6 +202,10 @@ public:
 	void AddDirtyStaticBody( const JPH::BodyID &id );
 	void RemoveDirtyStaticBody( const JPH::BodyID &id );
 
+	// Invalidate the GetObjectList() cache (a body is being added/removed outside the
+	// environment's own RemoveBody paths, e.g. JoltPhysicsObject's destructor).
+	void MarkObjectListDirty() const { m_bObjectListDirty = true; }
+
 private:
 
 	void RemoveBodyAndDeleteObject( JoltPhysicsObject* pObject );
