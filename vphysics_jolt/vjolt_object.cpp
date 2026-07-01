@@ -99,6 +99,13 @@ JoltPhysicsObject::JoltPhysicsObject( JPH::Body *pBody, JoltPhysicsEnvironment *
 	}
 
 	UpdateMaterialProperties();
+
+#if GAME_GMOD
+	// Register into g_pObjects so IsValidPhyiscsObject() / IPhysics::IsValidPhysicsObject can find
+	// objects created via CreatePolyObject/CreatePolyObjectStatic/CreateSphereObject. Previously only
+	// the StateRecorder-restore ctor below registered, leaving nearly every live object unregistered.
+	RegisterPhysicsObject( this );
+#endif
 }
 
 JoltPhysicsObject::JoltPhysicsObject( JPH::Body *pBody, JoltPhysicsEnvironment *pEnvironment, void *pGameData, JPH::StateRecorder &recorder )
