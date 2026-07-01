@@ -134,6 +134,7 @@ JoltPhysicsObject::~JoltPhysicsObject()
 		m_destroyedListeners[ i ]->OnJoltPhysicsObjectDestroyed( this );
 
 	m_pEnvironment->RemoveDirtyStaticBody( GetBodyID() );
+	m_pEnvironment->MarkObjectListDirty();
 
 	JPH::BodyInterface& bodyInterface = m_pPhysicsSystem->GetBodyInterfaceNoLock();
 	bodyInterface.DestroyBody( GetBodyID() );
