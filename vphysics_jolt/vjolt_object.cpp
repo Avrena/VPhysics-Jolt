@@ -99,6 +99,13 @@ JoltPhysicsObject::JoltPhysicsObject( JPH::Body *pBody, JoltPhysicsEnvironment *
 	}
 
 	UpdateMaterialProperties();
+
+#if GAME_GMOD
+	// Register so IsValidPhysicsObject can find objects created via the primary path
+	// (CreatePolyObject/CreatePolyObjectStatic/CreateSphereObject). Only the StateRecorder-restore
+	// ctor registered before, leaving most live objects untracked.
+	RegisterPhysicsObject( this );
+#endif
 }
 
 JoltPhysicsObject::JoltPhysicsObject( JPH::Body *pBody, JoltPhysicsEnvironment *pEnvironment, void *pGameData, JPH::StateRecorder &recorder )

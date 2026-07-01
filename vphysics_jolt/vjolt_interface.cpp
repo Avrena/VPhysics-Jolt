@@ -234,7 +234,7 @@ void JoltPhysicsInterface::DestroyAllCollisionSets()
 extern bool IsValidPhyiscsObject( IPhysicsObject* pObject );
 bool JoltPhysicsInterface::IsValidPhysicsObject( IPhysicsObject* pObject )
 {
-	return ::IsValidPhyiscsObject;
+	return ::IsValidPhyiscsObject( pObject );
 }
 #endif
 
