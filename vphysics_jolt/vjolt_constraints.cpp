@@ -216,13 +216,36 @@ void JoltPhysicsConstraint::SetAngularMotor( float rotSpeed, float maxAngularImp
 			// Something else to note is... does the below code for friction vs angular impulse work on
 			// ragdolls -> hinges correctly? This happens in Source, but this may not necessarily be correct.
 			// :/
-			VJoltAssert( m_pConstraint->GetSubType() == JPH::EConstraintSubType::SixDOF );
 
-			JPH::SixDOFConstraint *pConstraint = static_cast<JPH::SixDOFConstraint *>( m_pConstraint.GetPtr() );
-			pConstraint->SetTargetAngularVelocityCS( JPH::Vec3( rotSpeed, rotSpeed, rotSpeed ) );
-			pConstraint->SetMaxFriction( JPH::SixDOFConstraint::EAxis::RotationX, maxAngularImpulse );
-			pConstraint->SetMaxFriction( JPH::SixDOFConstraint::EAxis::RotationY, maxAngularImpulse );
-			pConstraint->SetMaxFriction( JPH::SixDOFConstraint::EAxis::RotationZ, maxAngularImpulse );
+			// InitialiseRagdoll creates a Fixed, Hinge or SwingTwist constraint depending on the
+			// number of free axes -- never a SixDOF -- so dispatch on the actual Jolt subtype.
+			// Casting to SixDOF here (as this used to) corrupts memory on $animatedfriction models.
+			switch ( m_pConstraint->GetSubType() )
+			{
+				case JPH::EConstraintSubType::SwingTwist:
+				{
+					JPH::SwingTwistConstraint *pConstraint = static_cast<JPH::SwingTwistConstraint *>( m_pConstraint.GetPtr() );
+					const JPH::EMotorState eMotorState = rotSpeed ? JPH::EMotorState::Velocity : JPH::EMotorState::Off;
+					pConstraint->SetSwingMotorState( eMotorState );
+					pConstraint->SetTwistMotorState( eMotorState );
+					pConstraint->SetTargetAngularVelocityCS( JPH::Vec3::sReplicate( rotSpeed ) );
+					pConstraint->SetMaxFrictionTorque( Max( vjolt_ragdoll_min_torque_friction.GetFloat(), fabsf( maxAngularImpulse ) ) );
+					break;
+				}
+
+				case JPH::EConstraintSubType::Hinge:
+				{
+					JPH::HingeConstraint *pConstraint = static_cast<JPH::HingeConstraint *>( m_pConstraint.GetPtr() );
+					pConstraint->SetMotorState( rotSpeed ? JPH::EMotorState::Velocity : JPH::EMotorState::Off );
+					pConstraint->SetTargetAngularVelocity( rotSpeed );
+					pConstraint->SetMaxFrictionTorque( Max( vjolt_ragdoll_min_torque_friction.GetFloat(), fabsf( maxAngularImpulse ) ) );
+					break;
+				}
+
+				default:
+					// Fixed joint (no free axes) -- nothing to motor.
+					break;
+			}
 			break;
 		}
 
