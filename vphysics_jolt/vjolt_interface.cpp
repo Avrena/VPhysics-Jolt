@@ -4,7 +4,15 @@
 //
 //=================================================================================================
 
+#if defined( __linux__ ) && !defined( _GNU_SOURCE )
+#define _GNU_SOURCE
+#endif
+
 #include "cbase.h"
+
+#if defined( __linux__ )
+#include <sched.h>
+#endif
 
 #include "vjolt_environment.h"
 #include "vjolt_collide.h"
@@ -31,6 +39,10 @@ static constexpr uint kTempAllocSize = 64 * 1024 * 1024;
 // This isn't an issue, the benefits of more threads tends to trail off between
 // 8-16 threads anyway.
 static constexpr uint kMaxPhysicsThreads = 64;
+
+// NCG: override the Jolt worker-thread count (0 = auto). Read once at init.
+static ConVar vjolt_worker_threads( "vjolt_worker_threads", "0", FCVAR_NONE,
+	"Number of Jolt physics worker threads (0 = auto: available CPUs - 1, cpuset-aware). Read once at init; requires map/server restart to change." );
 
 DEFINE_LOGGING_CHANNEL_NO_TAGS( LOG_VJolt, "VJolt", 0, LS_MESSAGE, Color( 205, 142, 212, 255 ) );
 DEFINE_LOGGING_CHANNEL_NO_TAGS( LOG_JoltInternal, "Jolt" );
@@ -132,13 +144,36 @@ InitReturnVal_t JoltPhysicsInterface::Init()
 	JPH::RegisterTypes();
 
 	// Create an allocator for temporary allocations during physics simulations
-	m_pTempAllocator = new JPH::TempAllocatorImpl( kTempAllocSize );
+	m_pTempAllocator = new JPH::TempAllocatorImplWithMallocFallback( kTempAllocSize );
 
 	// Josh:
 	// We may want to replace this with a better heuristic, or add a launch arg for this in future.
 	// Right now, this does what -1 does in Jolt, but limits it to 64 threads, as we cannot support
 	// more than this (see above).
-	const uint32 threadCount = Min( std::thread::hardware_concurrency() - 1, kMaxPhysicsThreads );
+	// NCG: honor the process cpuset/affinity (hardware_concurrency() can report host cores,
+	// not the cgroup allotment) and allow an explicit override via vjolt_worker_threads.
+	// The pool is created once here and cannot be resized live.
+	uint32 nAvailableCPUs = std::thread::hardware_concurrency();
+#if defined( __linux__ )
+	{
+		cpu_set_t cpuSet;
+		CPU_ZERO( &cpuSet );
+		if ( sched_getaffinity( 0, sizeof( cpuSet ), &cpuSet ) == 0 )
+		{
+			const int nAffinityCount = CPU_COUNT( &cpuSet );
+			if ( nAffinityCount > 0 )
+				nAvailableCPUs = (uint32)nAffinityCount;
+		}
+	}
+#endif
+
+	uint32 threadCount;
+	const int nWorkerOverride = vjolt_worker_threads.GetInt();
+	if ( nWorkerOverride > 0 )
+		threadCount = Min( (uint32)nWorkerOverride, kMaxPhysicsThreads );
+	else
+		threadCount = Min( nAvailableCPUs > 1 ? nAvailableCPUs - 1 : 1u, kMaxPhysicsThreads );
+
 	m_pJobSystem = new JPH::JobSystemThreadPool( JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, threadCount );
 
 	return INIT_OK;

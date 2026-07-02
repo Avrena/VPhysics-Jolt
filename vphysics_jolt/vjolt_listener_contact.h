@@ -4,6 +4,7 @@
 #include "vjolt_controller_fluid.h"
 #include "vjolt_surfaceprops.h"
 #include "ankerl/unordered_dense.h"
+#include <vector>
 
 #include <Jolt/Physics/Collision/EstimateCollisionResponse.h>
 
@@ -292,13 +293,32 @@ public:
 		return (uint64_t(keyA) << 32) | keyB;
 	}
 
-	// RaphaelIT7: ToDo, let's maybe not nuke the entire cache?
+	// NCG: only drop cache entries that involve pObject0 rather than nuking the whole
+	// map. A full clear forces every unrelated pair to re-run the locked (Lua-capable)
+	// ShouldCollide on its next contact -- a stall storm on the collision-group changes
+	// that are constant on a ragdoll-heavy server. The size cap bounds accumulation of
+	// stale entries for destroyed bodies (recycled BodyIDs are never revisited).
 	void InvalidShouldCollideCache( JoltPhysicsObject *pObject0 )
 	{
-		(void)pObject0; // Unused for now.
-
 		std::unique_lock<std::shared_mutex> mapLock( m_ShouldCollideCacheLock );
-		m_ShouldCollideCache.clear();
+
+		if ( !pObject0 || m_ShouldCollideCache.size() > 100000 )
+		{
+			m_ShouldCollideCache.clear();
+			return;
+		}
+
+		const uint32_t nKey = pObject0->GetBodyID().GetIndexAndSequenceNumber();
+		std::vector<uint64_t> keysToErase;
+		for ( const auto &kv : m_ShouldCollideCache )
+		{
+			const uint64_t k = kv.first;
+			if ( uint32_t( k >> 32 ) == nKey || uint32_t( k & 0xFFFFFFFFu ) == nKey )
+				keysToErase.push_back( k );
+		}
+
+		for ( const uint64_t k : keysToErase )
+			m_ShouldCollideCache.erase( k );
 	}
 
 	bool ShouldCollide( JoltPhysicsObject *pObject0, JoltPhysicsObject *pObject1 )
