@@ -111,6 +111,50 @@ namespace JPH {
 
 //-------------------------------------------------------------------------------------------------
 
+#if defined( __linux__ )
+extern char **environ;
+
+// GMod's srcds cannot set vjolt_* convars externally: console, cfg and +cmdline
+// sets are all silent no-ops against this module's tier1 ConVar objects (the
+// engine's virtual SetValue dispatch does not line up with this module's vtable
+// layout, while reads happen to work). Apply overrides from the environment at
+// startup instead: VJOLT_CVAR_<convar name>=<value>.
+static void ApplyEnvConVarOverrides()
+{
+	if ( !g_pCVar )
+		return;
+
+	static constexpr char kPrefix[] = "VJOLT_CVAR_";
+	static constexpr size_t kPrefixLen = sizeof( kPrefix ) - 1;
+
+	for ( char **ppEnv = environ; *ppEnv; ppEnv++ )
+	{
+		const char *pEntry = *ppEnv;
+		if ( strncmp( pEntry, kPrefix, kPrefixLen ) != 0 )
+			continue;
+
+		const char *pEquals = strchr( pEntry + kPrefixLen, '=' );
+		if ( !pEquals || pEquals == pEntry + kPrefixLen )
+			continue;
+
+		char szName[128];
+		const size_t uNameLen = Min( size_t( pEquals - ( pEntry + kPrefixLen ) ), sizeof( szName ) - 1 );
+		memcpy( szName, pEntry + kPrefixLen, uNameLen );
+		szName[uNameLen] = '\0';
+
+		ConVar *pVar = g_pCVar->FindVar( szName );
+		if ( !pVar )
+		{
+			Log_Warning( LOG_VJolt, "Env override ignored, unknown convar: %s\n", szName );
+			continue;
+		}
+
+		pVar->SetValue( pEquals + 1 );
+		Log_Msg( LOG_VJolt, "Env override: %s = %s\n", szName, pVar->GetString() );
+	}
+}
+#endif // defined( __linux__ )
+
 InitReturnVal_t JoltPhysicsInterface::Init()
 {
 	const InitReturnVal_t nRetVal = BaseClass::Init();
@@ -120,6 +164,10 @@ InitReturnVal_t JoltPhysicsInterface::Init()
 	}
 
 	MathLib_Init();
+
+#if defined( __linux__ )
+	ApplyEnvConVarOverrides();
+#endif
 
 #ifndef JPH_DISABLE_CUSTOM_ALLOCATOR
 	JPH::Allocate = Jolt::Allocate;

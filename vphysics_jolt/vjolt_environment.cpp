@@ -52,6 +52,7 @@ static constexpr uint kMaxBodyPairs = kMaxBodies;
 static constexpr uint kMaxContactConstraints = kMaxBodies;
 
 static ConVar vjolt_linearcast( "vjolt_linearcast", "1", FCVAR_NONE, "Whether bodies will be created with linear cast motion quality (only takes effect after map restart)." );
+static ConVar vjolt_linearcast_threshold( "vjolt_linearcast_threshold", "0", FCVAR_NONE, "Fraction of its inner radius a body must move per step before LinearCast (CCD) kicks in. 0 = cast every step (legacy behaviour); Jolt's native default is 0.75.", true, 0.0f, true, 1.0f );
 static ConVar vjolt_enhanced_inactive_edge_detection( "vjolt_enhanced_inactive_edge_detection", "1", FCVAR_NONE, "Whether bodies will be created with enhanced inactive edge detection (only takes effect after map restart)." );
 static ConVar vjolt_initial_simulation( "vjolt_initial_simulation", "0", FCVAR_NONE, "Whether to pre-settle physics objects on map load." );
 
@@ -804,7 +805,7 @@ void JoltPhysicsEnvironment::Simulate( float deltaTime )
 		settings.mNumVelocitySteps = vjolt_velocity_steps.GetInt();
 		settings.mNumPositionSteps = vjolt_position_steps.GetInt();
 		settings.mDeterministicSimulation = vjolt_deterministic.GetBool();
-		settings.mLinearCastThreshold = 0.0f;
+		settings.mLinearCastThreshold = vjolt_linearcast_threshold.GetFloat();
 		settings.mLinearCastMaxPenetration = 0.25f;
 		m_PhysicsSystem.SetPhysicsSettings( settings );
 	}

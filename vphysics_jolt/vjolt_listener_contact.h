@@ -8,6 +8,8 @@
 
 #include <Jolt/Physics/Collision/EstimateCollisionResponse.h>
 
+extern ConVar vjolt_contact_estimate;
+
 struct JoltPhysicsContactPair
 {
 	JoltPhysicsContactPair( JoltPhysicsObject *pObject1, JoltPhysicsObject *pObject2 )
@@ -149,6 +151,9 @@ public:
 
 		// Sensors don't generate impulses or friction events.
 		if ( ioSettings.mIsSensor )
+			return;
+
+		if ( !vjolt_contact_estimate.GetBool() )
 			return;
 
 		// Estimate the resolved contact and friction impulses for this manifold.
