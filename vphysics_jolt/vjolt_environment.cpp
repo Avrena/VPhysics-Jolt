@@ -60,7 +60,7 @@ static ConVar vjolt_initial_simulation( "vjolt_initial_simulation", "0", FCVAR_N
 static ConVar vjolt_substeps( "vjolt_substeps", "1", FCVAR_NONE, "Number of substeps to perform.", true, 1.0f, true, 8.0f );
 
 static ConVar vjolt_velocity_steps( "vjolt_velocity_steps", "10", FCVAR_NONE, "Number of velocity steps to perform.", true, 0.0f, true, 64.0f );
-static ConVar vjolt_position_steps( "vjolt_position_steps", "2", FCVAR_NONE, "Number of velocity steps to perform.", true, 0.0f, true, 64.0f );
+static ConVar vjolt_position_steps( "vjolt_position_steps", "2", FCVAR_NONE, "Number of position steps to perform.", true, 0.0f, true, 64.0f );
 static ConVar vjolt_deterministic( "vjolt_deterministic", "0", FCVAR_NONE, "Whether the simulation is deterministic or not." );
 
 static ConVar vjolt_baumgarte_factor( "vjolt_baumgarte_factor", "0.2", FCVAR_NONE, "Baumgarte stabilization factor (how much of the position error to 'fix' in 1 update). Changing this may help with constraint stability. Requires a map restart to change.", true, 0.0f, true, 1.0f );

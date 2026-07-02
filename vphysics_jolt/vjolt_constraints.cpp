@@ -308,7 +308,9 @@ void JoltPhysicsConstraint::SetBreakableParams( const constraint_breakableparams
 	const bool bBreakAngular = params.torqueLimit > 0.0f && params.torqueLimit < UNBREAKABLE_BREAK_LIMIT;
 
 	m_LinearBreakImpulse = bBreakLinear ? SourceToJolt::Distance( params.forceLimit ) : 0.0f;
-	m_AngularBreakImpulse = bBreakAngular ? DEG2RAD( params.torqueLimit ) : 0.0f;
+	// torqueLimit is an angular impulse (kg*in^2/s), not an angle -- convert with the
+	// squared distance factor to match the Jolt lambdas compared in CheckBroken.
+	m_AngularBreakImpulse = bBreakAngular ? SourceToJolt::Torque( params.torqueLimit ) : 0.0f;
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -602,6 +604,7 @@ void JoltPhysicsConstraint::InitialiseFixed( IPhysicsConstraintGroup *pGroup, co
 	settings.mAutoDetectPoint = true;
 
 	m_pConstraint = settings.Create( *refBody, *attBody );
+	m_pConstraint->SetEnabled( !pGroup && fixed.constraint.isActive );
 
 	m_pPhysicsSystem->AddConstraint( m_pConstraint );
 }
