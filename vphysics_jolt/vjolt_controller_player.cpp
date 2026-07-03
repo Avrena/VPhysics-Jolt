@@ -15,6 +15,20 @@ static ConVar vjolt_player_character_padding( "vjolt_player_character_padding", 
 static ConVar vjolt_player_debug( "vjolt_player_debug", "0" );
 static ConVar vjolt_player_disable_limit( "vjolt_player_disable_limit", "0.1", 0, "The min speed^2 before we just go where physics wants to take us" );
 
+// Player-vs-player separation is game movement's job, not vphysics'. With
+// mutual collision on, overlapped player hulls (spawn rushes, crowded cells)
+// force Jolt's EPA penetration-depth solver on every mutual pair every
+// substep, which melts high-population servers. Default off: player hulls go
+// in the MOVING_PLAYER layer, which collides with everything MOVING does
+// except other player hulls. Toggles live (layer is refreshed every presim).
+static ConVar vjolt_player_self_collision( "vjolt_player_self_collision", "0", FCVAR_NONE,
+	"Whether player character hulls collide with each other in the physics world." );
+
+static uint8 GetPlayerObjectLayer()
+{
+	return vjolt_player_self_collision.GetBool() ? Layers::MOVING : Layers::MOVING_PLAYER;
+}
+
 //-------------------------------------------------------------------------------------------------
 
 // Component-wise Vector clamp
@@ -229,11 +243,12 @@ static void CheckCollision( JoltPhysicsObject *pObject, JPH::CollideShapeCollect
 	if ( !pObject->IsCollisionEnabled() )
 		return;
 
-	// Create query broadphase layer filter
-	JPH::DefaultBroadPhaseLayerFilter broadphase_layer_filter = pSystem->GetDefaultBroadPhaseLayerFilter( Layers::MOVING );
+	// Create query broadphase layer filter (mirrors the character body's own
+	// layer so player-vs-player contacts match what the simulation generates)
+	JPH::DefaultBroadPhaseLayerFilter broadphase_layer_filter = pSystem->GetDefaultBroadPhaseLayerFilter( GetPlayerObjectLayer() );
 
 	// Create query object layer filter
-	JPH::DefaultObjectLayerFilter object_layer_filter = pSystem->GetDefaultLayerFilter( Layers::MOVING );
+	JPH::DefaultObjectLayerFilter object_layer_filter = pSystem->GetDefaultLayerFilter( GetPlayerObjectLayer() );
 
 	// Determine position to test
 	JPH::Vec3 position;
@@ -366,7 +381,7 @@ int JoltPhysicsPlayerController::TryTeleportObject()
 
 void JoltPhysicsPlayerController::OnPreSimulate( float flDeltaTime )
 {
-	m_pCharacter->SetLayer( m_pObject->IsCollisionEnabled() ? Layers::MOVING : Layers::NO_COLLIDE );
+	m_pCharacter->SetLayer( m_pObject->IsCollisionEnabled() ? GetPlayerObjectLayer() : Layers::NO_COLLIDE );
 
 	// Update position from dummy object.
 	{
@@ -550,7 +565,7 @@ void JoltPhysicsPlayerController::SetObjectInternal( JoltPhysicsObject *pObject 
 
 		JPH::Ref<JPH::CharacterSettings> settings = new JPH::CharacterSettings();
 		settings->mMass                        = m_pObject->GetMass();
-		settings->mLayer                       = Layers::MOVING;
+		settings->mLayer                       = GetPlayerObjectLayer();
 		settings->mUp                          = JPH::Vec3::sAxisZ();
 		settings->mFriction                    = sv_friction * k_flNormalSurfaceFriction * ( 1.0f / 64.0f ); // Account for Source's friction being tick based.
 		settings->mShape                       = m_pObject->GetBody()->GetShape();

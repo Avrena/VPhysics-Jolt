@@ -12,7 +12,12 @@ namespace Layers
 	inline constexpr uint8 MOVING = 2;
 	inline constexpr uint8 NO_COLLIDE = 3; // Disables collisions with everything, including the world.
 	inline constexpr uint8 DEBRIS = 4; // Disables collisions with everything except the world
-	inline constexpr uint8 NUM_LAYERS = 5;
+	// Player character hulls: collide like MOVING except never with each other.
+	// Player-vs-player interaction is handled by game movement code, not vphysics;
+	// overlapped player hulls (spawn rushes) otherwise force the EPA penetration
+	// solver on every mutual pair every substep and can melt the server.
+	inline constexpr uint8 MOVING_PLAYER = 5;
+	inline constexpr uint8 NUM_LAYERS = 6;
 };
 
 // Each broadphase layer results in a separate bounding volume tree in the broad phase. You at least want to have
@@ -27,4 +32,5 @@ namespace BroadPhaseLayers
 	inline constexpr JPH::BroadPhaseLayer MOVING( 2 );
 	inline constexpr JPH::BroadPhaseLayer NO_COLLIDE( 3 );
 	inline constexpr JPH::BroadPhaseLayer DEBRIS( 4 );
+	inline constexpr JPH::BroadPhaseLayer MOVING_PLAYER( 5 );
 };

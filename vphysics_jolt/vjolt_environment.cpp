@@ -78,17 +78,28 @@ public:
 		// NO_COLLIDE collides with nothing.
 		case Layers::NO_COLLIDE:
 			return	false;
-		// NON_MOVING collides with moving objects and debris.
+		// NON_MOVING collides with moving objects, player hulls and debris.
 		case Layers::NON_MOVING_WORLD:
 		case Layers::NON_MOVING_OBJECT:
 			return	inObject2 == Layers::MOVING ||
+					inObject2 == Layers::MOVING_PLAYER ||
 					inObject2 == Layers::DEBRIS;
-		// MOVING collides with moving and non-moving objects.
+		// MOVING collides with moving, player and non-moving objects.
 		case Layers::MOVING:
+			return	inObject2 == Layers::MOVING ||
+					inObject2 == Layers::MOVING_PLAYER ||
+					inObject2 == Layers::NON_MOVING_WORLD ||
+					inObject2 == Layers::NON_MOVING_OBJECT;
+
+		// MOVING_PLAYER collides like MOVING but never with other player hulls.
+		// Player-vs-player separation is game movement's job, and overlapped
+		// hulls (spawn stacking) would run the EPA penetration-depth solver on
+		// every mutual pair every substep, which melts high-pop servers.
+		case Layers::MOVING_PLAYER:
 			return	inObject2 == Layers::MOVING ||
 					inObject2 == Layers::NON_MOVING_WORLD ||
 					inObject2 == Layers::NON_MOVING_OBJECT;
-	
+
 		// DEBRIS only collides with non-moving objects.
 		case Layers::DEBRIS:
 			return	inObject2 == Layers::NON_MOVING_WORLD || inObject2 == Layers::NON_MOVING_OBJECT;
@@ -114,6 +125,7 @@ public:
 		mObjectToBroadPhase[Layers::MOVING] = BroadPhaseLayers::MOVING;
 		mObjectToBroadPhase[Layers::NO_COLLIDE] = BroadPhaseLayers::NO_COLLIDE;
 		mObjectToBroadPhase[Layers::DEBRIS] = BroadPhaseLayers::DEBRIS;
+		mObjectToBroadPhase[Layers::MOVING_PLAYER] = BroadPhaseLayers::MOVING_PLAYER;
 	}
 
 	uint GetNumBroadPhaseLayers() const override
@@ -137,6 +149,7 @@ public:
 		case (JPH::BroadPhaseLayer::Type)BroadPhaseLayers::NO_COLLIDE:			return "NO_COLLIDE";
 		case (JPH::BroadPhaseLayer::Type)BroadPhaseLayers::DEBRIS:				return "DEBRIS";
 		case (JPH::BroadPhaseLayer::Type)BroadPhaseLayers::MOVING:				return "MOVING";
+		case (JPH::BroadPhaseLayer::Type)BroadPhaseLayers::MOVING_PLAYER:		return "MOVING_PLAYER";
 		default:																VJoltAssert( false ); return "INVALID";
 		}
 	}
@@ -158,18 +171,27 @@ public:
 		case Layers::NO_COLLIDE:
 			return false;
 
-		// NON_MOVING collides with moving objects and debris.
+		// NON_MOVING collides with moving objects, player hulls and debris.
 		case Layers::NON_MOVING_WORLD:
 		case Layers::NON_MOVING_OBJECT:
 			return inLayer2 == BroadPhaseLayers::MOVING ||
+				   inLayer2 == BroadPhaseLayers::MOVING_PLAYER ||
 				   inLayer2 == BroadPhaseLayers::DEBRIS;
 
-		// MOVING collides with moving and non-moving objects.
+		// MOVING collides with moving, player and non-moving objects.
 		case Layers::MOVING:
+			return inLayer2 == BroadPhaseLayers::MOVING ||
+				   inLayer2 == BroadPhaseLayers::MOVING_PLAYER ||
+				   inLayer2 == BroadPhaseLayers::NON_MOVING_WORLD ||
+				   inLayer2 == BroadPhaseLayers::NON_MOVING_OBJECT;
+
+		// MOVING_PLAYER collides like MOVING but never with other player hulls
+		// (see JoltObjectLayerPairFilter for the reasoning).
+		case Layers::MOVING_PLAYER:
 			return inLayer2 == BroadPhaseLayers::MOVING ||
 				   inLayer2 == BroadPhaseLayers::NON_MOVING_WORLD ||
 				   inLayer2 == BroadPhaseLayers::NON_MOVING_OBJECT;
-	
+
 		// DEBRIS only collides with non-moving objects.
 		case Layers::DEBRIS:
 			return inLayer2 == BroadPhaseLayers::NON_MOVING_WORLD || inLayer2 == BroadPhaseLayers::NON_MOVING_OBJECT;
