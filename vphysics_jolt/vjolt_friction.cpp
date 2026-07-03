@@ -10,6 +10,17 @@
 
 #include "tier0/memdbgon.h"
 
+// Friction snapshots re-run a full narrow-phase CollideShape query against the
+// world on EVERY snapshot creation. The engine's CalculateObjectStress (player
+// crush damage, CBasePlayer::VPhysicsUpdate) creates snapshots for the player
+// AND every touching object, per player, per tick -- on a crowded server with
+// piled objects this goes quadratic and melts the main thread (observed live:
+// multi-second frames with ~all samples inside this query). 0 disables
+// populating snapshots (stress/crush damage sees no contacts) until snapshots
+// are rebuilt from tracked contact-listener pairs like IVP does.
+static ConVar vjolt_friction_snapshot( "vjolt_friction_snapshot", "1", FCVAR_NONE,
+	"Populate friction snapshots (used by CalculateObjectStress / crush damage). 0 = empty snapshots (cheap)." );
+
 namespace
 {
 	class FrictionSnapshotCollector final : public JPH::CollideShapeCollector
@@ -76,6 +87,9 @@ JoltPhysicsFrictionSnapshot::JoltPhysicsFrictionSnapshot( JoltPhysicsObject *pOb
 	: m_pSelf( pObject )
 {
 	if ( !pObject || !pObject->IsCollisionEnabled() )
+		return;
+
+	if ( !vjolt_friction_snapshot.GetBool() )
 		return;
 
 	JPH::PhysicsSystem *pSystem = pObject->GetJoltEnvironment()->GetPhysicsSystem();
