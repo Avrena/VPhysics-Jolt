@@ -57,9 +57,8 @@ void JoltPhysicsShadowController::Update( const Vector &position, const QAngle &
 	// velocities from it); drop the write and keep driving toward the last sane target.
 	if ( !IsSaneVector( position, kMaxSaneCoordSource ) || !IsSaneQAngle( angles ) )
 	{
-		static JoltSanityLogThrottle s_Throttle;
-		if ( s_Throttle.ShouldLog() )
-			Log_Warning( LOG_VJolt, "ShadowController %p: ignoring non-finite target (%g %g %g)\n",
+		if ( m_SanityLogThrottle.ShouldLog() )
+			Log_Warning( LOG_VJolt, "ShadowController %p: ignoring non-finite/runaway target (%g %g %g)\n",
 				this, position.x, position.y, position.z );
 		return;
 	}

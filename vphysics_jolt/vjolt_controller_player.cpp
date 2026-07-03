@@ -37,8 +37,9 @@ static ConVar vjolt_character_world_bound( "vjolt_character_world_bound", "20480
 // correction (and historically, teleports) can move the character much further in one step
 // than any legitimate motion; the derived spike otherwise feeds shadow collision events
 // (phantom crush damage for players standing against props) and the impulse-based speed
-// fallback. sv_maxvelocity defaults to 3500.
-static constexpr float kMaxEffectiveCharacterVelocity = 8000.0f;
+// fallback. sv_maxvelocity defaults to 3500; raise this on extreme-velocity (surf) servers.
+static ConVar vjolt_character_max_effective_velocity( "vjolt_character_max_effective_velocity", "8000", FCVAR_NONE,
+	"Cap (u/s) on the per-step effective velocity derived from player character movement." );
 
 static uint8 GetPlayerObjectLayer()
 {
@@ -97,9 +98,8 @@ void JoltPhysicsPlayerController::Update( const Vector &position, const Vector &
 		 !IsSaneVector( velocity, kMaxSaneVelocitySource ) ||
 		 !std::isfinite( secondsToArrival ) )
 	{
-		static JoltSanityLogThrottle s_Throttle;
-		if ( s_Throttle.ShouldLog() )
-			Log_Warning( LOG_VJolt, "Player controller %p: ignoring non-finite update (pos %g %g %g, vel %g %g %g)\n",
+		if ( m_SanityLogThrottle.ShouldLog() )
+			Log_Warning( LOG_VJolt, "Player controller %p: ignoring non-finite/runaway update (pos %g %g %g, vel %g %g %g)\n",
 				this, position.x, position.y, position.z, velocity.x, velocity.y, velocity.z );
 		return;
 	}
@@ -436,8 +436,7 @@ void JoltPhysicsPlayerController::OnPreSimulate( float flDeltaTime )
 		if ( !IsSaneVector( vRecover, kMaxSaneCoordSource ) )
 			vRecover = vec3_origin;
 
-		static JoltSanityLogThrottle s_Throttle;
-		if ( s_Throttle.ShouldLog() )
+		if ( m_SanityLogThrottle.ShouldLog() )
 			Log_Warning( LOG_VJolt, "Player controller %p: non-finite body position (%g %g %g), recovering to (%g %g %g)\n",
 				this, vObjectPosition.x, vObjectPosition.y, vObjectPosition.z, vRecover.x, vRecover.y, vRecover.z );
 
@@ -458,6 +457,9 @@ void JoltPhysicsPlayerController::OnPreSimulate( float flDeltaTime )
 	{
 		if ( IsSaneVector( m_vTargetPosition, flWorldBound ) && TryTeleportObject() )
 		{
+			// Restore the proper layer before returning so the recovery frame does not
+			// simulate one step in NO_COLLIDE (visible as a small floor-sink pop).
+			m_pCharacter->SetLayer( m_pObject->IsCollisionEnabled() ? GetPlayerObjectLayer() : Layers::NO_COLLIDE );
 			if ( m_bCharOutOfWorld )
 			{
 				m_bCharOutOfWorld = false;
@@ -558,8 +560,7 @@ void JoltPhysicsPlayerController::OnPreSimulate( float flDeltaTime )
 		// an arbitrary body and the controller math divides by dt, so keep this finite.
 		if ( !IsSaneVector( vControllerVelocity, kMaxSaneVelocitySource ) )
 		{
-			static JoltSanityLogThrottle s_Throttle;
-			if ( s_Throttle.ShouldLog() )
+			if ( m_SanityLogThrottle.ShouldLog() )
 				Log_Warning( LOG_VJolt, "Player controller %p: sanitized non-finite controller velocity\n", this );
 			vControllerVelocity = vec3_origin;
 		}
@@ -607,17 +608,18 @@ void JoltPhysicsPlayerController::OnPostSimulate( float flDeltaTime )
 	// propagating the poison into the game-visible object.
 	if ( !IsSaneVector( vNewPosition, kMaxSaneCoordSource ) )
 	{
-		static JoltSanityLogThrottle s_Throttle;
-		if ( s_Throttle.ShouldLog() )
+		if ( m_SanityLogThrottle.ShouldLog() )
 			Log_Warning( LOG_VJolt, "Player controller %p: character went non-finite post-step, restoring (%g %g %g)\n",
 				this, m_vOldPosition.x, m_vOldPosition.y, m_vOldPosition.z );
 
 		vNewPosition = IsSaneVector( m_vOldPosition, kMaxSaneCoordSource ) ? m_vOldPosition : vec3_origin;
 		m_pCharacter->SetPosition( SourceToJolt::Distance( vNewPosition ), JPH::EActivation::DontActivate );
 		m_pCharacter->SetLinearVelocity( JPH::Vec3::sZero() );
-		m_pObject->SetPosition( vNewPosition, QAngle(), false );
+		m_pObject->SetPosition( vNewPosition, vec3_angle, false );
 		m_pObject->SetVelocity( &vec3_origin, &vec3_origin );
+		m_vCurrentSpeed = vec3_origin;
 		m_vLastImpulse = vec3_origin;
+		m_bEnable = false; // Wait for a fresh game update before driving again.
 		return;
 	}
 
@@ -627,14 +629,15 @@ void JoltPhysicsPlayerController::OnPostSimulate( float flDeltaTime )
 	// further in one step than legitimate motion ever does, and this derived value feeds
 	// both the game's shadow collision events (impact damage) and the speed fallback above.
 	const float flEffectiveSpeed = vNewVelocity.Length();
+	const float flMaxEffectiveSpeed = vjolt_character_max_effective_velocity.GetFloat();
 	if ( !std::isfinite( flEffectiveSpeed ) )
 		vNewVelocity = vec3_origin;
-	else if ( flEffectiveSpeed > kMaxEffectiveCharacterVelocity )
-		vNewVelocity *= kMaxEffectiveCharacterVelocity / flEffectiveSpeed;
+	else if ( flMaxEffectiveSpeed > 0.0f && flEffectiveSpeed > flMaxEffectiveSpeed )
+		vNewVelocity *= flMaxEffectiveSpeed / flEffectiveSpeed;
 
 	AngularImpulse vAngularImpulse = vec3_origin;
 
-	m_pObject->SetPosition( vNewPosition, QAngle(), false );
+	m_pObject->SetPosition( vNewPosition, vec3_angle, false );
 	m_pObject->SetVelocity( &vNewVelocity, &vAngularImpulse );
 
 	m_vLastImpulse = vNewVelocity;
@@ -755,8 +758,7 @@ void JoltPhysicsPlayerController::SetObjectInternal( JoltPhysicsObject *pObject 
 		m_pObject->GetPosition( &vStartPosition, nullptr );
 		if ( !IsSaneVector( vStartPosition, kMaxSaneCoordSource ) )
 		{
-			static JoltSanityLogThrottle s_Throttle;
-			if ( s_Throttle.ShouldLog() )
+			if ( m_SanityLogThrottle.ShouldLog() )
 				Log_Warning( LOG_VJolt, "Player controller %p: attached object has non-finite position (%g %g %g), seeding at origin\n",
 					this, vStartPosition.x, vStartPosition.y, vStartPosition.z );
 			vStartPosition = vec3_origin;

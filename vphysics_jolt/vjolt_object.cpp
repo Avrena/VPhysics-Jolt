@@ -1218,6 +1218,18 @@ void JoltPhysicsObject::ClampShadowVelocityAgainstContacts( JPH::Vec3 &ioVelocit
 
 float JoltPhysicsObject::ComputeShadowControl( const hlshadowcontrol_params_t &params, float flSecondsToArrival, float flDeltaTime )
 {
+	// Game-supplied targets (the physgun drives held objects through here every tick) would
+	// be written straight into the body below; skip the drive this frame on poisoned input --
+	// the holder re-sends a fresh target next tick.
+	if ( !IsSaneVector( params.targetPosition, kMaxSaneCoordSource ) || !IsSaneQAngle( params.targetRotation ) )
+	{
+		static JoltSanityLogThrottle s_Throttle;
+		if ( s_Throttle.ShouldLog() )
+			Log_Warning( LOG_VJolt, "ComputeShadowControl: ignoring non-finite/runaway target for object %p (entity %p)\n",
+				this, m_pGameData );
+		return flSecondsToArrival;
+	}
+
 	JoltShadowControlParams joltParams =
 	{
 		.TargetPosition		= SourceToJolt::Distance( params.targetPosition ),

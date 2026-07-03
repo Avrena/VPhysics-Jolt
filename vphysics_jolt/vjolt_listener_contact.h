@@ -578,10 +578,14 @@ public:
 	}
 
 	// Called once per Simulate from the owning environment; drives the per-pair
-	// deltaCollisionTime reported on impact events.
+	// deltaCollisionTime reported on impact events. Integer microseconds: a float-seconds
+	// accumulator stops advancing once its ULP exceeds the tick (~3 days of uptime), after
+	// which every repeat impact would report delta 0 and the engine's repeat-collision
+	// discount would suppress impact damage server-wide.
 	void AdvanceSimulationTime( float flDeltaTime )
 	{
-		m_flSimulationTime.store( m_flSimulationTime.load( std::memory_order_relaxed ) + flDeltaTime, std::memory_order_relaxed );
+		const uint64_t nDeltaUs = static_cast< uint64_t >( flDeltaTime * 1e6f + 0.5f );
+		m_nSimulationTimeUs.store( m_nSimulationTimeUs.load( std::memory_order_relaxed ) + nDeltaUs, std::memory_order_relaxed );
 	}
 
 private:
@@ -594,7 +598,7 @@ private:
 	float StampPairCollisionTime( JoltPhysicsObject *pObject1, JoltPhysicsObject *pObject2 )
 	{
 		const uint64_t nKey = MakeCacheKey( pObject1, pObject2 );
-		const float flNow = m_flSimulationTime.load( std::memory_order_relaxed );
+		const uint64_t nNowUs = m_nSimulationTimeUs.load( std::memory_order_relaxed );
 
 		std::unique_lock lock( m_CollisionTimeLock );
 
@@ -608,12 +612,12 @@ private:
 		auto it = m_LastCollisionTime.find( nKey );
 		if ( it != m_LastCollisionTime.end() )
 		{
-			flDelta = flNow - it->second;
-			it->second = flNow;
+			flDelta = static_cast< float >( nNowUs - it->second ) * 1e-6f;
+			it->second = nNowUs;
 		}
 		else
 		{
-			m_LastCollisionTime.emplace( nKey, flNow );
+			m_LastCollisionTime.emplace( nKey, nNowUs );
 		}
 
 		return flDelta;
@@ -639,8 +643,8 @@ private:
 
 	// Per-pair last-collision-event stamps for deltaCollisionTime (see StampPairCollisionTime).
 	std::mutex m_CollisionTimeLock;
-	ankerl::unordered_dense::map< uint64_t, float > m_LastCollisionTime;
-	std::atomic< float > m_flSimulationTime = { 0.0f };
+	ankerl::unordered_dense::map< uint64_t, uint64_t > m_LastCollisionTime;
+	std::atomic< uint64_t > m_nSimulationTimeUs = { 0ull };
 
 	class JoltPhysicsCollisionInfo
 	{

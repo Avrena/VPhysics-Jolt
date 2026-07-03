@@ -54,4 +54,8 @@ private:
 	uint16 m_savedMaterialIndex = 0;
 	uint16 m_savedCallbackFlags = 0;
 	JPH::EMotionType m_savedMotionType = JPH::EMotionType::Dynamic;
+
+	// Per-controller so one chronically poisoned entity cannot consume the log budget for
+	// every other entity's onset line during an incident.
+	JoltSanityLogThrottle m_SanityLogThrottle;
 };

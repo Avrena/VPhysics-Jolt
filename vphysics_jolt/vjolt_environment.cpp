@@ -349,11 +349,36 @@ static objectparams_t NormalizeObjectParams( objectparams_t* pParams )
 	return params;
 }
 
+// A body CREATED at a non-finite position is the one poison the post-step sweep can never
+// heal: it is added with DontActivate (static ones stay inactive forever), so its AABB sits
+// in the broadphase tree degrading every query with no active-list entry to catch it.
+static void SanitizeCreationTransform( Vector &position, QAngle &angles, const char *pszCaller )
+{
+	if ( IsSaneVector( position, kMaxSaneCoordSource ) && IsSaneQAngle( angles ) )
+		return;
+
+	static JoltSanityLogThrottle s_Throttle;
+	if ( s_Throttle.ShouldLog() )
+		Log_Warning( LOG_VJolt, "%s: sanitized non-finite/runaway creation transform (%g %g %g)\n",
+			pszCaller, position.x, position.y, position.z );
+
+	// Park outside any playfield rather than at the origin so a broken static body cannot
+	// occupy real map space; the game repositions dynamic ones with its next sane teleport.
+	if ( !IsSaneVector( position, kMaxSaneCoordSource ) )
+		position = Vector( kQuarantineCoordSource, kQuarantineCoordSource, kQuarantineCoordSource );
+	if ( !IsSaneQAngle( angles ) )
+		angles = vec3_angle;
+}
+
 //-------------------------------------------------------------------------------------------------
 
 IPhysicsObject *JoltPhysicsEnvironment::CreatePolyObject( const CPhysCollide *pCollisionModel, int materialIndex, const Vector &position, const QAngle &angles, objectparams_t *pParams )
 {
 	objectparams_t params = NormalizeObjectParams( pParams );
+
+	Vector vSanePosition = position;
+	QAngle qSaneAngles = angles;
+	SanitizeCreationTransform( vSanePosition, qSaneAngles, "CreatePolyObject" );
 
 	const JPH::Shape* pShape = pCollisionModel->ToShape();
 	if ( params.massCenterOverride )
@@ -362,7 +387,7 @@ IPhysicsObject *JoltPhysicsEnvironment::CreatePolyObject( const CPhysCollide *pC
 		pShape = CreateCOMOverrideShape( pShape, massCenterOverride );
 	}
 
-	JPH::BodyCreationSettings settings( pShape, SourceToJolt::Distance( position ), SourceToJolt::Angle( angles ), JPH::EMotionType::Dynamic, Layers::MOVING );
+	JPH::BodyCreationSettings settings( pShape, SourceToJolt::Distance( vSanePosition ), SourceToJolt::Angle( qSaneAngles ), JPH::EMotionType::Dynamic, Layers::MOVING );
 	settings.mMassPropertiesOverride.mMass = params.mass;
 	//settings.mMassPropertiesOverride.mInertia = JPH::Mat44::sIdentity() * params.inertia;
 	settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia; // JPH::EOverrideMassProperties::MassAndInertiaProvided;
@@ -386,7 +411,11 @@ IPhysicsObject *JoltPhysicsEnvironment::CreatePolyObjectStatic( const CPhysColli
 {
 	objectparams_t params = NormalizeObjectParams( pParams );
 
-	JPH::BodyCreationSettings settings( pCollisionModel->ToShape(), SourceToJolt::Distance( position ), SourceToJolt::Angle( angles ), JPH::EMotionType::Static, Layers::NON_MOVING_WORLD );
+	Vector vSanePosition = position;
+	QAngle qSaneAngles = angles;
+	SanitizeCreationTransform( vSanePosition, qSaneAngles, "CreatePolyObjectStatic" );
+
+	JPH::BodyCreationSettings settings( pCollisionModel->ToShape(), SourceToJolt::Distance( vSanePosition ), SourceToJolt::Angle( qSaneAngles ), JPH::EMotionType::Static, Layers::NON_MOVING_WORLD );
 
 	if ( m_bUseLinearCast )
 		settings.mMotionQuality = JPH::EMotionQuality::LinearCast;
@@ -405,6 +434,10 @@ IPhysicsObject *JoltPhysicsEnvironment::CreateSphereObject( float radius, int ma
 {
 	objectparams_t params = NormalizeObjectParams( pParams );
 
+	Vector vSanePosition = position;
+	QAngle qSaneAngles = angles;
+	SanitizeCreationTransform( vSanePosition, qSaneAngles, "CreateSphereObject" );
+
 	const JPH::Shape *pShape = new JPH::SphereShape( SourceToJolt::Distance( radius ) );
 	if ( params.massCenterOverride )
 	{
@@ -415,7 +448,7 @@ IPhysicsObject *JoltPhysicsEnvironment::CreateSphereObject( float radius, int ma
 	JPH::EMotionType motionType = isStatic ? JPH::EMotionType::Static : JPH::EMotionType::Dynamic;
 	JPH::ObjectLayer objectLayer = isStatic ? Layers::NON_MOVING_WORLD : Layers::MOVING;
 
-	JPH::BodyCreationSettings settings( pShape, SourceToJolt::Distance( position ), SourceToJolt::Angle( angles ), motionType, objectLayer );
+	JPH::BodyCreationSettings settings( pShape, SourceToJolt::Distance( vSanePosition ), SourceToJolt::Angle( qSaneAngles ), motionType, objectLayer );
 
 	if ( !isStatic )
 	{
@@ -924,10 +957,15 @@ void JoltPhysicsEnvironment::Simulate( float deltaTime )
 
 // Replaces non-finite components and clamps runaway-but-finite ones, so a parked body keeps
 // a stable, tree-friendly AABB near wherever it ran off to (never inside the playfield).
-static float SanitizeCoord( float flValue, float flBound )
+// flScatter offsets fully-poisoned components inward per body so a batch of NaN bodies
+// (e.g. a ragdoll's bones) does not park as a pile of perfectly overlapped hulls -- waking
+// such a pile would hand the EPA penetration solver its worst case.
+static float SanitizeCoord( float flValue, float flBound, float flScatter )
 {
-	if ( !std::isfinite( flValue ) )
-		return flBound;
+	if ( std::isnan( flValue ) )
+		return flBound - flScatter;
+	if ( !std::isfinite( flValue ) ) // +/-inf keeps its sign
+		return flValue > 0.0f ? flBound - flScatter : -flBound + flScatter;
 	return Clamp( flValue, -flBound, flBound );
 }
 
@@ -957,8 +995,13 @@ void JoltPhysicsEnvironment::SanitizeActiveBodies()
 			continue;
 		}
 
+		// Kinematic bodies legitimately carry huge finite velocities for one step when a
+		// shadow-controlled entity warps (MoveKinematic derives velocity from distance /
+		// arrival time with no clamp -- elevators and trains resetting, round restarts);
+		// they self-heal on the next shadow update, so only park kinematics on true poison.
 		const JPH::Vec3 vLinearVelocity = pBody->GetLinearVelocity();
-		if ( vLinearVelocity.IsNaN() || pBody->GetAngularVelocity().IsNaN() || vLinearVelocity.Abs().ReduceMax() > flMaxVelocity )
+		const float flVelocityBound = pBody->IsKinematic() ? 1e30f : flMaxVelocity;
+		if ( vLinearVelocity.IsNaN() || pBody->GetAngularVelocity().IsNaN() || vLinearVelocity.Abs().ReduceMax() > flVelocityBound )
 			badBodies.push_back( pActiveBodies[ i ] );
 	}
 
@@ -974,10 +1017,13 @@ void JoltPhysicsEnvironment::SanitizeActiveBodies()
 			continue;
 
 		const JPH::Vec3 vPosition = pBody->GetPosition();
+		// Up to ~512 m of inward scatter; the shallowest park is still ~2.7x the maximum
+		// world extent, far outside any playfield.
+		const float flScatter = static_cast< float >( bodyID.GetIndex() & 1023 ) * 0.5f;
 		const JPH::Vec3 vParked = JPH::Vec3(
-			SanitizeCoord( vPosition.GetX(), flMaxCoord ),
-			SanitizeCoord( vPosition.GetY(), flMaxCoord ),
-			SanitizeCoord( vPosition.GetZ(), flMaxCoord ) );
+			SanitizeCoord( vPosition.GetX(), flMaxCoord, flScatter ),
+			SanitizeCoord( vPosition.GetY(), flMaxCoord, flScatter ),
+			SanitizeCoord( vPosition.GetZ(), flMaxCoord, flScatter ) );
 		const JPH::Quat qRotation = pBody->GetRotation().IsNaN() ? JPH::Quat::sIdentity() : pBody->GetRotation();
 
 		bodyInterface.SetPositionAndRotation( bodyID, vParked, qRotation, JPH::EActivation::DontActivate );

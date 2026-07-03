@@ -79,5 +79,10 @@ private:
 	// world and free-falling). Edge-triggered logging + recovery detection.
 	bool m_bCharOutOfWorld = false;
 
+	// Per-controller so one chronically poisoned player cannot consume the log budget for
+	// every other player's onset line -- the who-went-bad-when sequence is what operators
+	// grep during an incident.
+	JoltSanityLogThrottle m_SanityLogThrottle;
+
 
 };
