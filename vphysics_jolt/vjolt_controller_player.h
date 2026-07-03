@@ -75,5 +75,9 @@ private:
 	bool m_bEnable = false;
 	bool m_bUpdatedSinceLast = false;
 
+	// Character is currently frozen at the world-coordinate bound (parked outside the
+	// world and free-falling). Edge-triggered logging + recovery detection.
+	bool m_bCharOutOfWorld = false;
+
 
 };

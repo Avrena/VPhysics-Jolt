@@ -24,6 +24,22 @@ static ConVar vjolt_player_disable_limit( "vjolt_player_disable_limit", "0.1", 0
 static ConVar vjolt_player_self_collision( "vjolt_player_self_collision", "0", FCVAR_NONE,
 	"Whether player character hulls collide with each other in the physics world." );
 
+// Character bodies that leave the playable coordinate range free-fall forever -- there is
+// nothing outside the world to land on -- so their coordinates run away, degrade the
+// broadphase tree for every query and eventually go non-finite, which then spreads to other
+// characters through ground-detection queries (observed live: players parked in the void by
+// AFK systems poisoned dozens of in-world players within minutes). Freeze the character at
+// the bound instead; it recovers automatically on the next in-range target or teleport.
+static ConVar vjolt_character_world_bound( "vjolt_character_world_bound", "20480", FCVAR_NONE,
+	"Freeze player character bodies whose position leaves +/- this many units (0 = off)." );
+
+// Cap on the effective velocity derived from character movement each step. Penetration
+// correction (and historically, teleports) can move the character much further in one step
+// than any legitimate motion; the derived spike otherwise feeds shadow collision events
+// (phantom crush damage for players standing against props) and the impulse-based speed
+// fallback. sv_maxvelocity defaults to 3500.
+static constexpr float kMaxEffectiveCharacterVelocity = 8000.0f;
+
 static uint8 GetPlayerObjectLayer()
 {
 	return vjolt_player_self_collision.GetBool() ? Layers::MOVING : Layers::MOVING_PLAYER;
@@ -73,6 +89,21 @@ JoltPhysicsPlayerController::~JoltPhysicsPlayerController()
 
 void JoltPhysicsPlayerController::Update( const Vector &position, const Vector &velocity, float secondsToArrival, bool onground, IPhysicsObject *ground )
 {
+	// Reject poisoned game input: a non-finite target would persist in m_vTargetPosition and
+	// re-poison the character every presim, defeating any body-side cleanup (observed live:
+	// bodies healed in place were re-poisoned until the entity itself teleported, which
+	// routes a fresh sane position through here).
+	if ( !IsSaneVector( position, kMaxSaneCoordSource ) ||
+		 !IsSaneVector( velocity, kMaxSaneVelocitySource ) ||
+		 !std::isfinite( secondsToArrival ) )
+	{
+		static JoltSanityLogThrottle s_Throttle;
+		if ( s_Throttle.ShouldLog() )
+			Log_Warning( LOG_VJolt, "Player controller %p: ignoring non-finite update (pos %g %g %g, vel %g %g %g)\n",
+				this, position.x, position.y, position.z, velocity.x, velocity.y, velocity.z );
+		return;
+	}
+
 	m_bUpdatedSinceLast = true;
 
 	if ( ( velocity - m_vCurrentSpeed ).LengthSqr() < 1e-6f && ( position - m_vTargetPosition ).LengthSqr() < 1e-6f )
@@ -376,23 +407,115 @@ int JoltPhysicsPlayerController::TryTeleportObject()
 	m_pObject->GetPosition( nullptr, &qCurrentAngles );
 	m_pObject->SetPosition( m_vTargetPosition, qCurrentAngles, true );
 	m_pCharacter->SetPosition( SourceToJolt::Distance( m_vTargetPosition ) );
+
+	// The teleport moved the character; without this, OnPostSimulate derives an effective
+	// velocity from (new - stale old) / dt across the whole teleport distance and hands the
+	// game a huge impulse spike (phantom impact damage / camera shake), which also runs away
+	// through the m_vLastImpulse-based speed fallback.
+	m_vOldPosition = m_vTargetPosition;
+	m_vLastImpulse = vec3_origin;
 	return 1;
 }
 
 void JoltPhysicsPlayerController::OnPreSimulate( float flDeltaTime )
 {
+	// The object and the character copy positions into each other every frame (object ->
+	// character here, character -> object in OnPostSimulate), so one non-finite transform
+	// self-sustains and re-poisons whichever side gets cleaned first. Sanitize the pair
+	// before mirroring.
+	Vector vObjectPosition;
+	QAngle qObjectAngle;
+	m_pObject->GetPosition( &vObjectPosition, &qObjectAngle );
+
+	if ( !IsSaneVector( vObjectPosition, kMaxSaneCoordSource ) || !IsSaneQAngle( qObjectAngle ) )
+	{
+		// Body poisoned: recover to the game's requested target if sane, else the last good
+		// simulated position. vec3_origin only as the absolute last resort -- the game heals
+		// anything left there with its next real teleport.
+		Vector vRecover = IsSaneVector( m_vTargetPosition, kMaxSaneCoordSource ) ? m_vTargetPosition : m_vOldPosition;
+		if ( !IsSaneVector( vRecover, kMaxSaneCoordSource ) )
+			vRecover = vec3_origin;
+
+		static JoltSanityLogThrottle s_Throttle;
+		if ( s_Throttle.ShouldLog() )
+			Log_Warning( LOG_VJolt, "Player controller %p: non-finite body position (%g %g %g), recovering to (%g %g %g)\n",
+				this, vObjectPosition.x, vObjectPosition.y, vObjectPosition.z, vRecover.x, vRecover.y, vRecover.z );
+
+		vObjectPosition = vRecover;
+		qObjectAngle = vec3_angle;
+		m_pObject->SetPosition( vObjectPosition, qObjectAngle, true );
+		m_pObject->SetVelocity( &vec3_origin, &vec3_origin );
+		m_vCurrentSpeed = vec3_origin;
+		m_vLastImpulse = vec3_origin;
+		m_bEnable = false; // Wait for a fresh game update before driving again.
+	}
+
+	// Characters outside the playable coordinate range free-fall forever and run their
+	// coordinates away (see vjolt_character_world_bound). Snap back to the game's target if
+	// it is in range, otherwise freeze at the bound until the game moves the player.
+	const float flWorldBound = vjolt_character_world_bound.GetFloat();
+	if ( flWorldBound > 0.0f && !IsSaneVector( vObjectPosition, flWorldBound ) )
+	{
+		if ( IsSaneVector( m_vTargetPosition, flWorldBound ) && TryTeleportObject() )
+		{
+			if ( m_bCharOutOfWorld )
+			{
+				m_bCharOutOfWorld = false;
+				Log_Msg( LOG_VJolt, "Player controller %p: character recovered to in-range target (%.0f %.0f %.0f)\n",
+					this, m_vTargetPosition.x, m_vTargetPosition.y, m_vTargetPosition.z );
+			}
+			return;
+		}
+
+		const Vector vClamped(
+			Clamp( vObjectPosition.x, -flWorldBound, flWorldBound ),
+			Clamp( vObjectPosition.y, -flWorldBound, flWorldBound ),
+			Clamp( vObjectPosition.z, -flWorldBound, flWorldBound ) );
+
+		if ( !m_bCharOutOfWorld )
+		{
+			m_bCharOutOfWorld = true;
+			Log_Warning( LOG_VJolt, "Player controller %p: character left the world at (%.0f %.0f %.0f), freezing at the bound (recovers on next in-range update)\n",
+				this, vObjectPosition.x, vObjectPosition.y, vObjectPosition.z );
+		}
+
+		m_pObject->SetPosition( vClamped, qObjectAngle, true );
+		m_pObject->SetVelocity( &vec3_origin, &vec3_origin );
+		m_pCharacter->SetPositionAndRotation( SourceToJolt::Distance( vClamped ), SourceToJolt::Angle( qObjectAngle ), JPH::EActivation::DontActivate );
+		m_pCharacter->SetLinearVelocity( JPH::Vec3::sZero() );
+		m_pCharacter->SetLayer( Layers::NO_COLLIDE );
+
+		// Put the body to sleep so gravity stops re-accelerating it into the clamp every
+		// frame. Update() / TryTeleportObject reactivate it on recovery.
+		m_pObject->GetJoltEnvironment()->GetPhysicsSystem()->GetBodyInterfaceNoLock().DeactivateBody( m_pCharacter->GetBodyID() );
+
+		m_vOldPosition = vClamped;
+		m_vLastImpulse = vec3_origin;
+		return;
+	}
+
+	if ( m_bCharOutOfWorld )
+	{
+		m_bCharOutOfWorld = false;
+		Log_Msg( LOG_VJolt, "Player controller %p: character back in range at (%.0f %.0f %.0f)\n",
+			this, vObjectPosition.x, vObjectPosition.y, vObjectPosition.z );
+	}
+
 	m_pCharacter->SetLayer( m_pObject->IsCollisionEnabled() ? GetPlayerObjectLayer() : Layers::NO_COLLIDE );
 
 	// Update position from dummy object.
-	{
-		Vector vObjectPosition;
-		QAngle qObjectAngle;
-		m_pObject->GetPosition( &vObjectPosition, &qObjectAngle );
-		m_pCharacter->SetPositionAndRotation( SourceToJolt::Distance( vObjectPosition ), SourceToJolt::Angle( qObjectAngle ), JPH::EActivation::DontActivate );
-	}
+	m_pCharacter->SetPositionAndRotation( SourceToJolt::Distance( vObjectPosition ), SourceToJolt::Angle( qObjectAngle ), JPH::EActivation::DontActivate );
 
 	Vector vOldPosition = JoltToSource::Distance( m_pCharacter->GetPosition() );
 	Vector vOldVelocity = JoltToSource::Distance( m_pCharacter->GetLinearVelocity() );
+
+	// The character's carried velocity can hold solver artifacts; a non-finite or runaway
+	// value here would flow through ComputePlayerController into the next step.
+	if ( !IsSaneVector( vOldVelocity, kMaxSaneVelocitySource ) )
+	{
+		vOldVelocity = vec3_origin;
+		m_pCharacter->SetLinearVelocity( JPH::Vec3::sZero() );
+	}
 
 	Vector vDeltaPos = m_vTargetPosition - vOldPosition;
 
@@ -431,6 +554,16 @@ void JoltPhysicsPlayerController::OnPreSimulate( float flDeltaTime )
 		}
 		vControllerVelocity += vGroundVelocity;
 
+		// Final gate before the velocity enters the simulation: ground velocity comes from
+		// an arbitrary body and the controller math divides by dt, so keep this finite.
+		if ( !IsSaneVector( vControllerVelocity, kMaxSaneVelocitySource ) )
+		{
+			static JoltSanityLogThrottle s_Throttle;
+			if ( s_Throttle.ShouldLog() )
+				Log_Warning( LOG_VJolt, "Player controller %p: sanitized non-finite controller velocity\n", this );
+			vControllerVelocity = vec3_origin;
+		}
+
 		/* Way too experimental
 		if (m_pCharacter->IsSupported())
 		{
@@ -468,7 +601,37 @@ void JoltPhysicsPlayerController::OnPostSimulate( float flDeltaTime )
 
 	// Calculate effective velocity
 	Vector vNewPosition = JoltToSource::Distance( m_pCharacter->GetPosition() );
+
+	// The character stepped into non-finite territory (broadphase-poisoning contagion, e.g.
+	// through a poisoned ground body): restore the last sane transform and freeze instead of
+	// propagating the poison into the game-visible object.
+	if ( !IsSaneVector( vNewPosition, kMaxSaneCoordSource ) )
+	{
+		static JoltSanityLogThrottle s_Throttle;
+		if ( s_Throttle.ShouldLog() )
+			Log_Warning( LOG_VJolt, "Player controller %p: character went non-finite post-step, restoring (%g %g %g)\n",
+				this, m_vOldPosition.x, m_vOldPosition.y, m_vOldPosition.z );
+
+		vNewPosition = IsSaneVector( m_vOldPosition, kMaxSaneCoordSource ) ? m_vOldPosition : vec3_origin;
+		m_pCharacter->SetPosition( SourceToJolt::Distance( vNewPosition ), JPH::EActivation::DontActivate );
+		m_pCharacter->SetLinearVelocity( JPH::Vec3::sZero() );
+		m_pObject->SetPosition( vNewPosition, QAngle(), false );
+		m_pObject->SetVelocity( &vec3_origin, &vec3_origin );
+		m_vLastImpulse = vec3_origin;
+		return;
+	}
+
 	Vector vNewVelocity = ( vNewPosition - m_vOldPosition ) / flDeltaTime;
+
+	// Cap the effective velocity: penetration-correction snaps can move the character much
+	// further in one step than legitimate motion ever does, and this derived value feeds
+	// both the game's shadow collision events (impact damage) and the speed fallback above.
+	const float flEffectiveSpeed = vNewVelocity.Length();
+	if ( !std::isfinite( flEffectiveSpeed ) )
+		vNewVelocity = vec3_origin;
+	else if ( flEffectiveSpeed > kMaxEffectiveCharacterVelocity )
+		vNewVelocity *= kMaxEffectiveCharacterVelocity / flEffectiveSpeed;
+
 	AngularImpulse vAngularImpulse = vec3_origin;
 
 	m_pObject->SetPosition( vNewPosition, QAngle(), false );
@@ -547,6 +710,20 @@ void JoltPhysicsPlayerController::SetObjectInternal( JoltPhysicsObject *pObject 
 	// Set our new object
 	m_pObject = pObject;
 
+	// Controllers are reused across respawns: the game detaches the dying player's object
+	// and attaches the fresh one, often same-frame during mass respawn waves. Carrying
+	// kinematic state across bodies drove the first presim from the PREVIOUS body's target
+	// and impulse -- including its poison if it died non-finite (observed live: NaN
+	// mass-poisoning onset correlated with simultaneous job-change respawns). Start neutral;
+	// the game's first Update() re-arms the controller.
+	m_vMaxSpeed = vec3_origin;
+	m_vCurrentSpeed = vec3_origin;
+	m_vLastImpulse = vec3_origin;
+	m_flSecondsToArrival = 0.0f;
+	m_bEnable = false;
+	m_bUpdatedSinceLast = false;
+	m_bCharOutOfWorld = false;
+
 	// Adjust the new object
 	if ( m_pObject )
 	{
@@ -572,7 +749,23 @@ void JoltPhysicsPlayerController::SetObjectInternal( JoltPhysicsObject *pObject 
 		settings->mMaxSlopeAngle               = JPH::DegreesToRadians( 45.573 );
 		settings->mEnhancedInternalEdgeRemoval = true;
 
-		m_pCharacter = new JPH::Character( settings, m_pObject->GetBody()->GetPosition(), JPH::Quat::sIdentity(), m_pObject->GetBody()->GetUserData(), m_pObject->GetJoltEnvironment()->GetPhysicsSystem() );
+		// Seed the controller's positional state from the new body, sanitized: a character
+		// born at a non-finite position poisons the broadphase on its first step.
+		Vector vStartPosition;
+		m_pObject->GetPosition( &vStartPosition, nullptr );
+		if ( !IsSaneVector( vStartPosition, kMaxSaneCoordSource ) )
+		{
+			static JoltSanityLogThrottle s_Throttle;
+			if ( s_Throttle.ShouldLog() )
+				Log_Warning( LOG_VJolt, "Player controller %p: attached object has non-finite position (%g %g %g), seeding at origin\n",
+					this, vStartPosition.x, vStartPosition.y, vStartPosition.z );
+			vStartPosition = vec3_origin;
+			m_pObject->SetPosition( vStartPosition, QAngle(), true );
+		}
+		m_vTargetPosition = vStartPosition;
+		m_vOldPosition = vStartPosition;
+
+		m_pCharacter = new JPH::Character( settings, SourceToJolt::Distance( vStartPosition ), JPH::Quat::sIdentity(), m_pObject->GetBody()->GetUserData(), m_pObject->GetJoltEnvironment()->GetPhysicsSystem() );
 		m_pCharacter->AddToPhysicsSystem();
 	}
 }

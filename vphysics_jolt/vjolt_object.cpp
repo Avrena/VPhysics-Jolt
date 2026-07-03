@@ -564,6 +564,18 @@ Vector JoltPhysicsObject::GetMassCenterLocalSpace() const
 
 void JoltPhysicsObject::SetPosition( const Vector &worldPosition, const QAngle &angles, bool isTeleport )
 {
+	// A non-finite write here would put a poisoned AABB into the broadphase tree and degrade
+	// every query in the system. Drop the write and keep the last good transform; the game
+	// heals broken entities with a sane teleport, which passes straight through.
+	if ( !IsSaneVector( worldPosition, kMaxSaneCoordSource ) || !IsSaneQAngle( angles ) )
+	{
+		static JoltSanityLogThrottle s_Throttle;
+		if ( s_Throttle.ShouldLog() )
+			Log_Warning( LOG_VJolt, "SetPosition: dropping non-finite/runaway position (%g %g %g) for object %p (entity %p)\n",
+				worldPosition.x, worldPosition.y, worldPosition.z, this, m_pGameData );
+		return;
+	}
+
 	if ( vjolt_object_debug.GetBool() )
 	{
 		Vector currentPos;
@@ -617,8 +629,58 @@ void JoltPhysicsObject::GetPositionMatrix( matrix3x4_t *positionMatrix ) const
 	*positionMatrix = matrix;
 }
 
+// Returns a finite, magnitude-capped copy of a game-provided velocity. Non-finite input is
+// zeroed (there is no meaningful direction to preserve); runaway-but-finite input keeps its
+// direction. Applies to both linear velocity and angular impulse (same vector type).
+static Vector SanitizeInputVelocity( const Vector &v, bool *pbModified )
+{
+	if ( !IsFinite3( v ) )
+	{
+		*pbModified = true;
+		return vec3_origin;
+	}
+
+	Vector out = v;
+	const float flLength = out.Length();
+	if ( !std::isfinite( flLength ) )
+	{
+		// Components finite but the magnitude overflows float: garbage either way.
+		*pbModified = true;
+		return vec3_origin;
+	}
+
+	if ( flLength > kMaxSaneVelocitySource )
+	{
+		out *= kMaxSaneVelocitySource / flLength;
+		*pbModified = true;
+	}
+
+	return out;
+}
+
 void JoltPhysicsObject::SetVelocity( const Vector *velocity, const AngularImpulse *angularVelocity )
 {
+	Vector vSaneVelocity;
+	AngularImpulse vSaneAngularVelocity;
+	bool bModified = false;
+	if ( velocity )
+	{
+		vSaneVelocity = SanitizeInputVelocity( *velocity, &bModified );
+		velocity = &vSaneVelocity;
+	}
+	if ( angularVelocity )
+	{
+		vSaneAngularVelocity = SanitizeInputVelocity( *angularVelocity, &bModified );
+		angularVelocity = &vSaneAngularVelocity;
+	}
+	if ( bModified )
+	{
+		static JoltSanityLogThrottle s_Throttle;
+		if ( s_Throttle.ShouldLog() )
+			Log_Warning( LOG_VJolt, "SetVelocity: sanitized non-finite/runaway velocity for object %p (entity %p)\n",
+				this, m_pGameData );
+	}
+
 	if ( vjolt_object_debug.GetBool() )
 	{
 		Log_Msg( LOG_VJolt, "SetVelocity: v=%s(%.1f,%.1f,%.1f) w=%s(%.1f,%.1f,%.1f)\n",
@@ -680,6 +742,27 @@ void JoltPhysicsObject::AddVelocity( const Vector *velocity, const AngularImpuls
 {
 	if ( !IsMoveable() )
 		return;
+
+	Vector vSaneVelocity;
+	AngularImpulse vSaneAngularVelocity;
+	bool bModified = false;
+	if ( velocity )
+	{
+		vSaneVelocity = SanitizeInputVelocity( *velocity, &bModified );
+		velocity = &vSaneVelocity;
+	}
+	if ( angularVelocity )
+	{
+		vSaneAngularVelocity = SanitizeInputVelocity( *angularVelocity, &bModified );
+		angularVelocity = &vSaneAngularVelocity;
+	}
+	if ( bModified )
+	{
+		static JoltSanityLogThrottle s_Throttle;
+		if ( s_Throttle.ShouldLog() )
+			Log_Warning( LOG_VJolt, "AddVelocity: sanitized non-finite/runaway velocity for object %p (entity %p)\n",
+				this, m_pGameData );
+	}
 
 	if ( vjolt_object_debug.GetBool() )
 		Log_Msg( LOG_VJolt, "AddVelocity: |v|=%.1f |w|=%.1f\n",
@@ -1441,6 +1524,15 @@ void JoltPhysicsObject::AddToPosition( JPH::Vec3Arg addPos )
 
 void JoltPhysicsObject::SetPosition( const Vector &worldPosition )
 {
+	if ( !IsSaneVector( worldPosition, kMaxSaneCoordSource ) )
+	{
+		static JoltSanityLogThrottle s_Throttle;
+		if ( s_Throttle.ShouldLog() )
+			Log_Warning( LOG_VJolt, "SetPosition: dropping non-finite/runaway position (%g %g %g) for object %p (entity %p)\n",
+				worldPosition.x, worldPosition.y, worldPosition.z, this, m_pGameData );
+		return;
+	}
+
 	JPH::Vec3 joltPosition = SourceToJolt::Distance( worldPosition );
 
 	JPH::BodyInterface &bodyInterface = m_pPhysicsSystem->GetBodyInterfaceNoLock();
@@ -1450,8 +1542,18 @@ void JoltPhysicsObject::SetPosition( const Vector &worldPosition )
 
 void JoltPhysicsObject::AddVelocity( const Vector &worldPosition )
 {
+	bool bModified = false;
+	const Vector vSaneVelocity = SanitizeInputVelocity( worldPosition, &bModified );
+	if ( bModified )
+	{
+		static JoltSanityLogThrottle s_Throttle;
+		if ( s_Throttle.ShouldLog() )
+			Log_Warning( LOG_VJolt, "AddVelocity: sanitized non-finite/runaway velocity for object %p (entity %p)\n",
+				this, m_pGameData );
+	}
+
 	JPH::BodyInterface &bodyInterface = m_pPhysicsSystem->GetBodyInterfaceNoLock();
-	bodyInterface.AddLinearVelocity( m_pBody->GetID(), SourceToJolt::Distance( worldPosition ) );
+	bodyInterface.AddLinearVelocity( m_pBody->GetID(), SourceToJolt::Distance( vSaneVelocity ) );
 }
 
 Vector JoltPhysicsObject::GetVelocity()

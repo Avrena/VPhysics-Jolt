@@ -53,6 +53,17 @@ JoltPhysicsShadowController::~JoltPhysicsShadowController()
 
 void JoltPhysicsShadowController::Update( const Vector &position, const QAngle &angles, float timeOffset )
 {
+	// A poisoned target persists and re-poisons the body every presim (MoveKinematic derives
+	// velocities from it); drop the write and keep driving toward the last sane target.
+	if ( !IsSaneVector( position, kMaxSaneCoordSource ) || !IsSaneQAngle( angles ) )
+	{
+		static JoltSanityLogThrottle s_Throttle;
+		if ( s_Throttle.ShouldLog() )
+			Log_Warning( LOG_VJolt, "ShadowController %p: ignoring non-finite target (%g %g %g)\n",
+				this, position.x, position.y, position.z );
+		return;
+	}
+
 	JPH::Vec3 targetPosition = SourceToJolt::Distance( position );
 	JPH::Quat targetRotation = SourceToJolt::Angle( angles );
 

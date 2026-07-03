@@ -211,6 +211,10 @@ private:
 	void RemoveBodyAndDeleteObject( JoltPhysicsObject* pObject );
 	void DeleteDeadObjects();
 
+	// Post-step sweep: park any active body with a non-finite or runaway transform/velocity
+	// so its AABB cannot poison the broadphase tree. See vjolt_util.h for the rationale.
+	void SanitizeActiveBodies();
+
 	template <typename T>
 	void AddPhysicsSaveRestorePointer( uintp oldPtr, T* newPtr );
 

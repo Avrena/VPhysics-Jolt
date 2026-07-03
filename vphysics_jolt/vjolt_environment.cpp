@@ -901,6 +901,11 @@ void JoltPhysicsEnvironment::Simulate( float deltaTime )
 	for ( IJoltPhysicsController *pController : m_pPhysicsControllers )
 		pController->OnPostSimulate( deltaTime );
 
+	// Last line of defense against broadphase poisoning: any body that stepped into
+	// non-finite or runaway coordinates this frame gets parked before its AABB can
+	// degrade the tree for everyone else.
+	SanitizeActiveBodies();
+
 	m_bSimulating = false;
 
 	// If the delete queue is disabled, we only added to it during the simulation
@@ -911,6 +916,79 @@ void JoltPhysicsEnvironment::Simulate( float deltaTime )
 #ifdef JPH_DEBUG_RENDERER
 	JoltPhysicsDebugRenderer::GetInstance().RenderPhysicsSystem( m_PhysicsSystem );
 #endif
+}
+
+// Replaces non-finite components and clamps runaway-but-finite ones, so a parked body keeps
+// a stable, tree-friendly AABB near wherever it ran off to (never inside the playfield).
+static float SanitizeCoord( float flValue, float flBound )
+{
+	if ( !std::isfinite( flValue ) )
+		return flBound;
+	return Clamp( flValue, -flBound, flBound );
+}
+
+void JoltPhysicsEnvironment::SanitizeActiveBodies()
+{
+	const JPH::BodyID *pActiveBodies = m_PhysicsSystem.GetActiveBodiesUnsafe( JPH::EBodyType::RigidBody );
+	const uint32 uActiveBodies = m_PhysicsSystem.GetNumActiveBodies( JPH::EBodyType::RigidBody );
+
+	const float flMaxCoord = SourceToJolt::Distance( kQuarantineCoordSource );
+	const float flMaxVelocity = SourceToJolt::Distance( kMaxSaneVelocitySource );
+
+	// Deactivation mutates the active list, so collect offenders first. No allocation in
+	// the (overwhelmingly common) clean case.
+	std::vector< JPH::BodyID > badBodies;
+	for ( uint32 i = 0; i < uActiveBodies; i++ )
+	{
+		const JPH::Body *pBody = m_PhysicsSystem.GetBodyLockInterfaceNoLock().TryGetBody( pActiveBodies[ i ] );
+		if ( !pBody )
+			continue;
+
+		// IsNaN() first: SSE max does not propagate NaN reliably, so the bound check alone
+		// cannot be trusted to catch it. The bound then catches +/-inf and runaway values.
+		const JPH::Vec3 vPosition = pBody->GetPosition();
+		if ( vPosition.IsNaN() || pBody->GetRotation().IsNaN() || vPosition.Abs().ReduceMax() > flMaxCoord )
+		{
+			badBodies.push_back( pActiveBodies[ i ] );
+			continue;
+		}
+
+		const JPH::Vec3 vLinearVelocity = pBody->GetLinearVelocity();
+		if ( vLinearVelocity.IsNaN() || pBody->GetAngularVelocity().IsNaN() || vLinearVelocity.Abs().ReduceMax() > flMaxVelocity )
+			badBodies.push_back( pActiveBodies[ i ] );
+	}
+
+	if ( badBodies.empty() )
+		return;
+
+	static JoltSanityLogThrottle s_Throttle;
+	JPH::BodyInterface &bodyInterface = m_PhysicsSystem.GetBodyInterfaceNoLock();
+	for ( JPH::BodyID bodyID : badBodies )
+	{
+		const JPH::Body *pBody = m_PhysicsSystem.GetBodyLockInterfaceNoLock().TryGetBody( bodyID );
+		if ( !pBody )
+			continue;
+
+		const JPH::Vec3 vPosition = pBody->GetPosition();
+		const JPH::Vec3 vParked = JPH::Vec3(
+			SanitizeCoord( vPosition.GetX(), flMaxCoord ),
+			SanitizeCoord( vPosition.GetY(), flMaxCoord ),
+			SanitizeCoord( vPosition.GetZ(), flMaxCoord ) );
+		const JPH::Quat qRotation = pBody->GetRotation().IsNaN() ? JPH::Quat::sIdentity() : pBody->GetRotation();
+
+		bodyInterface.SetPositionAndRotation( bodyID, vParked, qRotation, JPH::EActivation::DontActivate );
+		bodyInterface.SetLinearAndAngularVelocity( bodyID, JPH::Vec3::sZero(), JPH::Vec3::sZero() );
+		bodyInterface.DeactivateBody( bodyID );
+
+		if ( s_Throttle.ShouldLog() )
+		{
+			const JoltPhysicsObject *pObject = reinterpret_cast< const JoltPhysicsObject * >( pBody->GetUserData() );
+			Log_Warning( LOG_VJolt, "Parked non-finite/runaway body %u (object %p, entity %p) at (%g %g %g), was (%g %g %g)\n",
+				bodyID.GetIndex(), pObject, pObject ? pObject->GetGameData() : nullptr,
+				vParked.GetX(), vParked.GetY(), vParked.GetZ(),
+				vPosition.GetX(), vPosition.GetY(), vPosition.GetZ() );
+		}
+	}
 }
 
 bool JoltPhysicsEnvironment::IsInSimulation() const

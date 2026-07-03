@@ -6,8 +6,63 @@
 
 #pragma once
 
+#include <cmath>
+
 inline constexpr float InchesToMetres = 0.0254f;
 inline constexpr float MetresToInches = 1.0f / 0.0254f;
+
+//-------------------------------------------------------------------------------------------------
+// NaN / runaway-coordinate sanitation.
+//
+// A single non-finite AABB inserted into the broadphase quad-tree degrades every query in the
+// system (node-bound unions absorb the NaN), and characters then catch the poison through
+// ground-detection and contact queries -- observed on a live 80-player server as dozens of
+// player bodies at NaN within minutes and multi-second simulation frames. The usual patient
+// zero is a character body parked outside the world (AFK-park systems, hidden avatars,
+// out-of-map noclip): nothing exists to land on out there, so it free-falls forever and its
+// coordinates run away. These helpers give the input paths, the player controller and the
+// post-step sweep a common definition of "sane".
+
+// Way past any legitimate Source coordinate (world is +/-16384); past this the value is
+// treated as poison regardless of how it got there.
+inline constexpr float kMaxSaneCoordSource = 1e6f;
+
+// Velocities past this (Source units/s) are solver/correction artifacts; sv_maxvelocity
+// defaults to 3500 and even surf/trigger_push gameplay stays well under 10k.
+inline constexpr float kMaxSaneVelocitySource = 1e5f;
+
+// The post-step sweep parks active bodies whose position leaves this range (4x the maximum
+// world extent -- legitimate gameplay cannot get here, runaway integration can).
+inline constexpr float kQuarantineCoordSource = 65536.0f;
+
+inline bool IsFinite3( const Vector &v )
+{
+	return std::isfinite( v.x ) && std::isfinite( v.y ) && std::isfinite( v.z );
+}
+
+inline bool IsSaneVector( const Vector &v, float flMaxAbs )
+{
+	return IsFinite3( v ) && fabsf( v.x ) < flMaxAbs && fabsf( v.y ) < flMaxAbs && fabsf( v.z ) < flMaxAbs;
+}
+
+inline bool IsSaneQAngle( const QAngle &a )
+{
+	return std::isfinite( a.x ) && std::isfinite( a.y ) && std::isfinite( a.z );
+}
+
+// Throttle for sanitation warnings: log the first few occurrences per site in full, then
+// exponentially sparser, so a body that is poisoned every frame cannot spam the console at
+// simulation rate but also never goes fully silent.
+struct JoltSanityLogThrottle
+{
+	bool ShouldLog()
+	{
+		const uint32 n = ++m_nCount;
+		return n <= 8 || ( n & ( n - 1 ) ) == 0; // first 8, then powers of two
+	}
+
+	uint32 m_nCount = 0;
+};
 
 // TODO! Remove loam_expr -> constexpr when mathlib stuff is sorted.
 #define loam_expr inline
