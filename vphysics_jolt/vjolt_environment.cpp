@@ -821,6 +821,10 @@ void JoltPhysicsEnvironment::Simulate( float deltaTime )
 	// stale impulses on first Accumulate call this tick.
 	JoltPhysicsObject::AdvanceContactImpulseTick();
 
+	// Advance the listener's pair-collision clock (drives the deltaCollisionTime
+	// reported on impact events).
+	m_ContactListener.AdvanceSimulationTime( deltaTime );
+
 	{
 		JPH::PhysicsSettings settings = m_PhysicsSystem.GetPhysicsSettings();
 		settings.mBaumgarte = vjolt_baumgarte_factor.GetFloat(); // 0.2 def

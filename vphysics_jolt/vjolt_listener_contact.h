@@ -9,6 +9,7 @@
 #include <Jolt/Physics/Collision/EstimateCollisionResponse.h>
 
 extern ConVar vjolt_contact_estimate;
+extern ConVar vjolt_shadow_collision_min_speed;
 
 struct JoltPhysicsContactPair
 {
@@ -126,11 +127,25 @@ public:
 
 			const bool bSane = m_GlobalCollisionEventCount < MaxCollisionEvents;
 
-			const bool bSendCollisionCallback = ( bHasSound && bSane ) || bIsShadowCollision;
+			// Shadow-pair events (player vs prop) bypass the sound-speed gate and the event
+			// cap because the game needs them for impact damage -- but Jolt re-adds
+			// manifolds every few ticks for moving contacts, so a player standing against a
+			// prop otherwise emits full impact events at rub speed. Gate on the pair's
+			// approach speed: player impact damage thresholds start around ~300 u/s, so a
+			// server can set the convar there and "player rubs prop" emits nothing while
+			// "prop flies into player" still hurts. Default 0 preserves stock behavior.
+			const bool bSendCollisionCallback = ( bHasSound && bSane ) ||
+				( bIsShadowCollision && flCollisionSpeed >= vjolt_shadow_collision_min_speed.GetFloat() );
 
 			if ( bSendCollisionCallback )
 			{
-				m_CollisionEvents.EmplaceBack( GetThreadId(), JoltPhysicsCollisionInfo( pObject1, pObject2, inManifold ) );
+				// IVP reports the time since this specific pair last collided, and the
+				// game's impact damage code uses small deltas to discount repeated hits
+				// from a sustained contact. The previous hardcoded 100.0 made every
+				// manifold re-add look like a fresh full-energy impact.
+				m_CollisionEvents.EmplaceBack( GetThreadId(),
+					JoltPhysicsCollisionInfo( pObject1, pObject2, inManifold ),
+					StampPairCollisionTime( pObject1, pObject2 ) );
 				m_GlobalCollisionEventCount++;
 			}
 		}
@@ -562,7 +577,47 @@ public:
 			m_pGameListener->PostSimulationFrame();
 	}
 
+	// Called once per Simulate from the owning environment; drives the per-pair
+	// deltaCollisionTime reported on impact events.
+	void AdvanceSimulationTime( float flDeltaTime )
+	{
+		m_flSimulationTime.store( m_flSimulationTime.load( std::memory_order_relaxed ) + flDeltaTime, std::memory_order_relaxed );
+	}
+
 private:
+
+	// Returns the time in seconds since this pair last produced a collision event (IVP
+	// deltaCollisionTime semantics) and stamps 'now' for the next one. A pair's first event
+	// reports "long ago" (100.0, matching the engine's out-of-range sentinel). Runs on Jolt
+	// worker threads via OnContactAdded; emitted events are few (sound cap + shadow speed
+	// gate), so the lock is quiet.
+	float StampPairCollisionTime( JoltPhysicsObject *pObject1, JoltPhysicsObject *pObject2 )
+	{
+		const uint64_t nKey = MakeCacheKey( pObject1, pObject2 );
+		const float flNow = m_flSimulationTime.load( std::memory_order_relaxed );
+
+		std::unique_lock lock( m_CollisionTimeLock );
+
+		// Stale entries for destroyed bodies accumulate (recycled BodyIDs carry a new
+		// sequence number and never revisit an old key); reset wholesale rather than
+		// tracking body lifetimes. Pairs then briefly report "long ago" again.
+		if ( m_LastCollisionTime.size() > 16384 )
+			m_LastCollisionTime.clear();
+
+		float flDelta = 100.0f;
+		auto it = m_LastCollisionTime.find( nKey );
+		if ( it != m_LastCollisionTime.end() )
+		{
+			flDelta = flNow - it->second;
+			it->second = flNow;
+		}
+		else
+		{
+			m_LastCollisionTime.emplace( nKey, flNow );
+		}
+
+		return flDelta;
+	}
 
 	static uint32 GetThreadId()
 	{
@@ -581,6 +636,11 @@ private:
 	std::mutex m_ShouldCollideLock;
 	std::shared_mutex m_ShouldCollideCacheLock;
 	ankerl::unordered_dense::map< uint64_t, bool > m_ShouldCollideCache;
+
+	// Per-pair last-collision-event stamps for deltaCollisionTime (see StampPairCollisionTime).
+	std::mutex m_CollisionTimeLock;
+	ankerl::unordered_dense::map< uint64_t, float > m_LastCollisionTime;
+	std::atomic< float > m_flSimulationTime = { 0.0f };
 
 	class JoltPhysicsCollisionInfo
 	{
@@ -656,7 +716,7 @@ private:
 	class JoltPhysicsCollisionEvent
 	{
 	public:
-		JoltPhysicsCollisionEvent( const JoltPhysicsCollisionInfo &info )
+		JoltPhysicsCollisionEvent( const JoltPhysicsCollisionInfo &info, float flDeltaCollisionTime = 100.0f )
 			: m_Data{ info }
 		{
 			JoltPhysicsObject *pObject1 = m_Data.GetPair().pObject1;
@@ -668,7 +728,7 @@ private:
 			m_Event.surfaceProps[1]		= pObject2->GetMaterialIndex();
 			m_Event.isCollision			= IsCollision( pObject1, pObject2 );
 			m_Event.isShadowCollision	= IsShadowCollision( pObject1, pObject2 );
-			m_Event.deltaCollisionTime	= 100.0f;
+			m_Event.deltaCollisionTime	= flDeltaCollisionTime;
 			m_Event.collisionSpeed		= 0.0f;
 			m_Event.pInternalData		= &m_Data;
 		}
