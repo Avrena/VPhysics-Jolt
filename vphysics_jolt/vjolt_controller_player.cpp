@@ -747,6 +747,15 @@ void JoltPhysicsPlayerController::SetObjectInternal( JoltPhysicsObject *pObject 
 		settings->mMass                        = m_pObject->GetMass();
 		settings->mLayer                       = GetPlayerObjectLayer();
 		settings->mUp                          = JPH::Vec3::sAxisZ();
+		// IVP parity: the player shadow object does NOT gravity-fall on its own -- game
+		// movement owns player gravity and feeds the resulting velocity through Update()
+		// (which enables the controller whenever it is nonzero). With Jolt's default
+		// gravity the character free-falls whenever the controller is idle: a player
+		// standing still floats-in-place under IVP, but here a player parked outside the
+		// world sank forever, ran its coordinates away and seeded the NaN contagion this
+		// branch contains -- and driven characters had gravity applied on top of the
+		// game-supplied velocity that already includes it.
+		settings->mGravityFactor               = 0.0f;
 		settings->mFriction                    = sv_friction * k_flNormalSurfaceFriction * ( 1.0f / 64.0f ); // Account for Source's friction being tick based.
 		settings->mShape                       = m_pObject->GetBody()->GetShape();
 		settings->mMaxSlopeAngle               = JPH::DegreesToRadians( 45.573 );
