@@ -488,9 +488,19 @@ public:
 			// after impulses have been applied). Reading pre-solver velocity here would
 			// over-report the impact for any externally-driven body (e.g. physgun-held
 			// props), causing spurious camera shake on sustained contact.
+			// Player-controlled sides substitute the CONTACT-TIME game-driven velocity
+			// (stored in the event): the body velocity is the correction term, and the
+			// live controller state may already be detached/zeroed by an earlier
+			// callback in this same flush.
 			Vector vel1, vel2, normal;
-			pObj1->GetVelocity( &vel1, nullptr );
-			pObj2->GetVelocity( &vel2, nullptr );
+			if ( event.m_Data.IsObject1PlayerDriven() )
+				vel1 = JoltToSource::Distance( event.m_Data.GetObject1PreCollisionVelocity() );
+			else
+				pObj1->GetVelocity( &vel1, nullptr );
+			if ( event.m_Data.IsObject2PlayerDriven() )
+				vel2 = JoltToSource::Distance( event.m_Data.GetObject2PreCollisionVelocity() );
+			else
+				pObj2->GetVelocity( &vel2, nullptr );
 			event.m_Data.GetSurfaceNormal( normal );
 			event.m_Event.collisionSpeed = fabsf( ( vel1 - vel2 ).Dot( normal ) );
 
@@ -526,7 +536,34 @@ public:
 		// Clear it this time as we are done with these!
 		m_CollisionEvents.ForEach< true >( [ this ]( JoltPhysicsCollisionEvent& event )
 		{
+			JoltPhysicsObject *pObj1 = event.m_Data.GetPair().pObject1;
+			JoltPhysicsObject *pObj2 = event.m_Data.GetPair().pObject2;
+
+			// The game samples post-collision velocities during this callback (the
+			// deltaV term of player crush damage). For player-controlled objects the
+			// body velocity is the position-derived correction, capped only by
+			// vjolt_character_max_effective_velocity -- still a phantom. Fake it to
+			// the CONTACT-TIME game-driven velocity stored in the event, mirroring the
+			// PreCollision faking above: the player's own deltaV then reads ~zero
+			// (IVP parity -- the converged controller barely deflects), and using the
+			// stored flag/velocity keeps pre/post self-consistent even if the
+			// controller detached or zeroed its state earlier in this flush.
+			const bool bFake1 = event.m_Data.IsObject1PlayerDriven();
+			const bool bFake2 = event.m_Data.IsObject2PlayerDriven();
+
+			JPH::Vec3 realVel1 = JPH::Vec3::sZero();
+			JPH::Vec3 realVel2 = JPH::Vec3::sZero();
+			if ( bFake1 )
+				realVel1 = pObj1->FakeJoltLinearVelocity( event.m_Data.GetObject1PreCollisionVelocity() );
+			if ( bFake2 )
+				realVel2 = pObj2->FakeJoltLinearVelocity( event.m_Data.GetObject2PreCollisionVelocity() );
+
 			m_pGameListener->PostCollision( &event.m_Event );
+
+			if ( bFake1 )
+				pObj1->RestoreJoltLinearVelocity( realVel1 );
+			if ( bFake2 )
+				pObj2->RestoreJoltLinearVelocity( realVel2 );
 		});
 
 		// Send Friction events. The game uses these to drive scrape sounds and
@@ -589,6 +626,32 @@ public:
 	}
 
 private:
+
+	// Velocity as collision events should report it. For player-controlled objects the
+	// body's velocity is the shadow controller's correction term ((target - pos) / dt),
+	// which spikes on any blocked/penetrating contact and reads as a phantom high-speed
+	// impact -- live kill feed showed players one-shot by TOUCHING resting items, because
+	// the correction spike both passed the vjolt_shadow_collision_min_speed gate and
+	// supplied the event's impact energy. IVP reported the game-driven velocity for the
+	// player shadow object; do the same (fed via SetPlayerDrivenVelocity from the player
+	// controller's Update).
+	static Vector GetEffectiveVelocity( JoltPhysicsObject *pObject )
+	{
+		if ( pObject->GetCallbackFlags() & CALLBACK_IS_PLAYER_CONTROLLER )
+			return pObject->GetPlayerDrivenVelocity();
+
+		Vector vVelocity;
+		pObject->GetVelocity( &vVelocity, nullptr );
+		return vVelocity;
+	}
+
+	static JPH::Vec3 GetEffectiveJoltVelocity( JoltPhysicsObject *pObject )
+	{
+		if ( pObject->GetCallbackFlags() & CALLBACK_IS_PLAYER_CONTROLLER )
+			return SourceToJolt::Distance( pObject->GetPlayerDrivenVelocity() );
+
+		return pObject->GetBody()->GetLinearVelocity();
+	}
 
 	// Returns the time in seconds since this pair last produced a collision event (IVP
 	// deltaCollisionTime semantics) and stamps 'now' for the next one. A pair's first event
@@ -661,8 +724,18 @@ private:
 			, m_ContactPoint( JoltToSource::Distance( inManifold.GetWorldSpaceContactPointOn1( 0 ) ) )
 			// Unused...
 			, m_ContactSpeed( vec3_origin )
-			, m_Velocity0( pObject1->GetBody()->GetLinearVelocity() )
-			, m_Velocity1( pObject2->GetBody()->GetLinearVelocity() )
+			// Pre-collision velocities as the game will see them via PreCollision's
+			// velocity faking: player-controlled sides report the game-driven velocity,
+			// not the shadow-correction spike (see GetEffectiveJoltVelocity). The
+			// player-driven decision is CAPTURED HERE, at contact time: the controller
+			// can detach (death/disconnect from an earlier callback in the same flush)
+			// or zero its state between contact and flush, and re-deriving from live
+			// flags at flush time would reintroduce the phantom-velocity class of bug
+			// on exactly those teardown ticks.
+			, m_Velocity0( GetEffectiveJoltVelocity( pObject1 ) )
+			, m_Velocity1( GetEffectiveJoltVelocity( pObject2 ) )
+			, m_bPlayerDriven0( ( pObject1->GetCallbackFlags() & CALLBACK_IS_PLAYER_CONTROLLER ) != 0 )
+			, m_bPlayerDriven1( ( pObject2->GetCallbackFlags() & CALLBACK_IS_PLAYER_CONTROLLER ) != 0 )
 		{
 		}
 
@@ -674,6 +747,10 @@ private:
 
 		JPH::Vec3 m_Velocity0 = JPH::Vec3::sZero();
 		JPH::Vec3 m_Velocity1 = JPH::Vec3::sZero();
+
+		// Captured at contact time; see the manifold constructor.
+		bool m_bPlayerDriven0 = false;
+		bool m_bPlayerDriven1 = false;
 	};
 
 	class JoltPhysicsCollisionData final : public IPhysicsCollisionData
@@ -712,6 +789,16 @@ private:
 		JPH::Vec3 GetObject2PreCollisionVelocity() const
 		{
 			return m_CollisionData.m_Velocity1;
+		}
+
+		bool IsObject1PlayerDriven() const
+		{
+			return m_CollisionData.m_bPlayerDriven0;
+		}
+
+		bool IsObject2PlayerDriven() const
+		{
+			return m_CollisionData.m_bPlayerDriven1;
 		}
 	private:
 		JoltPhysicsCollisionInfo m_CollisionData;
@@ -772,7 +859,9 @@ private:
 
 		static float GetCollisionSpeed( JoltPhysicsObject *pObject1, JoltPhysicsObject *pObject2, Vector vecNormal )
 		{
-			const Vector vecCollisionSpeed = pObject1->GetVelocity() - pObject2->GetVelocity();
+			// Effective velocities: player-controlled objects report the game-driven
+			// velocity, not the shadow-correction spike (see GetEffectiveVelocity).
+			const Vector vecCollisionSpeed = GetEffectiveVelocity( pObject1 ) - GetEffectiveVelocity( pObject2 );
 			return fabsf( vecCollisionSpeed.Dot( vecNormal ) );
 		}
 

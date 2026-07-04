@@ -106,6 +106,13 @@ void JoltPhysicsPlayerController::Update( const Vector &position, const Vector &
 
 	m_bUpdatedSinceLast = true;
 
+	// Mirror the game-driven velocity onto the object for collision-event reporting
+	// (see GetPlayerDrivenVelocity): impact damage must see what the game is driving
+	// the player at, not the controller's correction velocity. Deliberately above the
+	// early-out so the object's copy can never go stale relative to m_vCurrentSpeed.
+	if ( m_pObject )
+		m_pObject->SetPlayerDrivenVelocity( velocity );
+
 	if ( ( velocity - m_vCurrentSpeed ).LengthSqr() < 1e-6f && ( position - m_vTargetPosition ).LengthSqr() < 1e-6f )
 		return;
 
@@ -445,6 +452,7 @@ void JoltPhysicsPlayerController::OnPreSimulate( float flDeltaTime )
 		m_pObject->SetPosition( vObjectPosition, qObjectAngle, true );
 		m_pObject->SetVelocity( &vec3_origin, &vec3_origin );
 		m_vCurrentSpeed = vec3_origin;
+		m_pObject->SetPlayerDrivenVelocity( vec3_origin );
 		m_vLastImpulse = vec3_origin;
 		m_bEnable = false; // Wait for a fresh game update before driving again.
 	}
@@ -618,6 +626,7 @@ void JoltPhysicsPlayerController::OnPostSimulate( float flDeltaTime )
 		m_pObject->SetPosition( vNewPosition, vec3_angle, false );
 		m_pObject->SetVelocity( &vec3_origin, &vec3_origin );
 		m_vCurrentSpeed = vec3_origin;
+		m_pObject->SetPlayerDrivenVelocity( vec3_origin );
 		m_vLastImpulse = vec3_origin;
 		m_bEnable = false; // Wait for a fresh game update before driving again.
 		return;
@@ -704,6 +713,7 @@ void JoltPhysicsPlayerController::SetObjectInternal( JoltPhysicsObject *pObject 
 	{
 		m_pObject->RemoveDestroyedListener( this );
 		m_pObject->RemoveCallbackFlags( CALLBACK_IS_PLAYER_CONTROLLER );
+		m_pObject->SetPlayerDrivenVelocity( vec3_origin );
 		m_pObject->UpdateLayer();
 
 		m_pCharacter->RemoveFromPhysicsSystem();
@@ -734,6 +744,9 @@ void JoltPhysicsPlayerController::SetObjectInternal( JoltPhysicsObject *pObject 
 		m_pObject->GetBody()->SetMotionType( JPH::EMotionType::Kinematic );
 		m_pObject->AddDestroyedListener( this );
 		m_pObject->AddCallbackFlags( CALLBACK_IS_PLAYER_CONTROLLER );
+		// Objects can be recycled across controller attachments; never inherit a stale
+		// game-driven velocity into collision-event reporting.
+		m_pObject->SetPlayerDrivenVelocity( vec3_origin );
 		m_pObject->UpdateLayer();
 
 		static constexpr float k_flNormalSurfaceFriction = 0.8f; // Default surface friction.

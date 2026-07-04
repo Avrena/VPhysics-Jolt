@@ -252,6 +252,23 @@ public:
 		m_pBody->SetLinearVelocity( realVelocity );
 	}
 
+	// Game-driven velocity for player-controlled objects, fed by
+	// JoltPhysicsPlayerController::Update. The body's own velocity is the shadow
+	// controller's correction term ((target - position) / dt), which spikes on any
+	// blocked/penetrating contact; collision events must report what the GAME is
+	// driving the player at (IVP parity), not the correction. Written on the game
+	// thread outside simulation, read by the contact listener during simulation --
+	// no overlap, so no locking.
+	void SetPlayerDrivenVelocity( const Vector &vVelocity )
+	{
+		m_vPlayerDrivenVelocity = vVelocity;
+	}
+
+	const Vector &GetPlayerDrivenVelocity() const
+	{
+		return m_vPlayerDrivenVelocity;
+	}
+
 	void UpdateLayer();
 	void RecomputeDrag();
 
@@ -315,6 +332,9 @@ private:
 	AngularImpulse m_vLastAngularVelocity = vec3_origin;
 	Vector m_vLastPosition = vec3_origin;
 	QAngle m_qLastOrientation = vec3_angle;
+
+	// See Set/GetPlayerDrivenVelocity.
+	Vector m_vPlayerDrivenVelocity = vec3_origin;
 
 	CUtlVector< IJoltObjectDestroyedListener * > m_destroyedListeners;
 
