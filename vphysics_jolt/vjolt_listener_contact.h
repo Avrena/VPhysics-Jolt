@@ -11,6 +11,15 @@
 extern ConVar vjolt_contact_estimate;
 extern ConVar vjolt_shadow_collision_min_speed;
 
+#if GAME_GMOD
+// Defined in vjolt_object.cpp. Returns true iff pObject is still in the live-object registry
+// (g_pObjects) -- a pointer-membership test only, never dereferences pObject, so it is safe on a
+// stale/freed pointer (the wrapper is Unregistered at the top of ~JoltPhysicsObject).
+extern bool IsValidPhyiscsObject( IPhysicsObject *pObject );
+// Bumped on every object destruction; see the fast-path in FlushCallbacks.
+extern uint32 g_JoltObjectDestroyGeneration;
+#endif
+
 struct JoltPhysicsContactPair
 {
 	JoltPhysicsContactPair( JoltPhysicsObject *pObject1, JoltPhysicsObject *pObject2 )
@@ -469,29 +478,69 @@ public:
 		m_pGameSolver = pSolver;
 	}
 
+	// Returns true if either object was freed earlier in THIS flush by a
+	// re-entrant game callback (see FlushCallbacks). Shared by every dispatch loop so the same
+	// use-after-free class is closed on collision, friction, touch, trigger and fluid events -- not
+	// just the collision Pre/Post pair. Cheap: one uint32 compare unless a mid-flush destroy actually
+	// happened this flush (g_pObjects membership lookups only on that slow path). Always defined
+	// (returns false when !GAME_GMOD) so the call sites need no #if.
+	bool ShouldSkipFreedEvent( [[maybe_unused]] JoltPhysicsObject *pObj1, [[maybe_unused]] JoltPhysicsObject *pObj2 )
+	{
+	#if GAME_GMOD
+		if ( g_JoltObjectDestroyGeneration != m_nFlushDestroyGenStart &&
+			 ( !IsValidPhyiscsObject( pObj1 ) || !IsValidPhyiscsObject( pObj2 ) ) )
+			return true;
+	#endif
+		return false;
+	}
+
 	void FlushCallbacks()
 	{
 		if ( !m_pGameListener )
 			return;
 
-		// Send PreCollision events
+	#if GAME_GMOD
+		// Snapshot the destroy generation once per flush. The per-event guard below only does the
+		// g_pObjects lookups when g_JoltObjectDestroyGeneration moves off this snapshot, i.e. a
+		// game callback freed an object mid-flush -- otherwise it is a single integer compare.
+		m_nFlushDestroyGenStart = g_JoltObjectDestroyGeneration;
+	#endif
+
+		// Collision events -- dispatched as matched Pre/Post PAIRS, one event at a time.
 		//
-		// Don't clear the collision events the first time around as we have
-		// the post-collisde event to send too!
-		m_CollisionEvents.ForEach< false >( [ this ]( JoltPhysicsCollisionEvent& event )
+		// Source's IVP contract (public/vphysics_interface.h: "PreCollision/PostCollision ALWAYS
+		// come in matched pairs!!!") requires Pre and Post for one collision to arrive adjacently:
+		// the engine's CCollisionEvent latches pObjects into a singleton (m_gameEvent) at Pre and
+		// reuses it at Post without re-Init. The previous all-Pre-then-all-Post batching mis-paired
+		// object<->entity for every Post but the last and, worse, could hand an object freed
+		// mid-flush to a later Post -- which the engine forwards into CBoneFollower::VPhysicsCollision
+		// -> CPhysicsSwapTemp ("bogus physics object" Sys_Error). Pairing Pre+Post per event keeps
+		// the singleton latched to THIS event and bounds the free window to a single event.
+		//
+		// ORDERING NOTE: stock ran StartTouch/EnterTrigger/FluidStartTouch BETWEEN the all-Pre and
+		// all-Post passes. Per-event pairing makes Pre and Post adjacent, so those three loops now run
+		// AFTER every PostCollision (Friction/EndTouch/LeaveTrigger/FluidEndTouch were already after
+		// Post in stock, unchanged). No Source contract orders StartTouch vs PostCollision (IVP
+		// interleaves per contact), so this is benign -- but it moves a Post-callback free ahead of the
+		// StartTouch family, which is why EVERY dispatch loop below carries the same validity guard.
+		m_CollisionEvents.ForEach< true >( [ this ]( JoltPhysicsCollisionEvent& event )
 		{
 			JoltPhysicsObject *pObj1 = event.m_Data.GetPair().pObject1;
 			JoltPhysicsObject *pObj2 = event.m_Data.GetPair().pObject2;
 
-			// Compute collisionSpeed from the post-resolution body velocities (matches
-			// IVP's contact->speed semantics: relative velocity at the contact surface
-			// after impulses have been applied). Reading pre-solver velocity here would
-			// over-report the impact for any externally-driven body (e.g. physgun-held
-			// props), causing spurious camera shake on sustained contact.
-			// Player-controlled sides substitute the CONTACT-TIME game-driven velocity
-			// (stored in the event): the body velocity is the correction term, and the
-			// live controller state may already be detached/zeroed by an earlier
-			// callback in this same flush.
+			// A game callback dispatched earlier in this same flush can UTIL_Remove an entity,
+			// synchronously freeing its JoltPhysicsObject (re-entrant CleanupDeleteList). Such an
+			// object is already absent from g_pObjects (Unregistered at the top of the dtor), so
+			// skip the event rather than dereference -- or hand the engine -- a dangling pointer.
+			// The same guard runs on every sibling loop below (touch/trigger/friction/fluid).
+			if ( ShouldSkipFreedEvent( pObj1, pObj2 ) )
+				return;
+
+			// Compute collisionSpeed from the post-resolution body velocities (matches IVP's
+			// contact->speed semantics: relative velocity at the contact surface after impulses).
+			// Player-controlled sides substitute the CONTACT-TIME game-driven velocity stored in
+			// the event (the live body velocity is the shadow-correction spike, and the controller
+			// may already be detached/zeroed by an earlier callback in this same flush).
 			Vector vel1, vel2, normal;
 			if ( event.m_Data.IsObject1PlayerDriven() )
 				vel1 = JoltToSource::Distance( event.m_Data.GetObject1PreCollisionVelocity() );
@@ -504,50 +553,20 @@ public:
 			event.m_Data.GetSurfaceNormal( normal );
 			event.m_Event.collisionSpeed = fabsf( ( vel1 - vel2 ).Dot( normal ) );
 
-			// Fake the velocities for the objects during the PreCollision callback so
-			// we get a proper delta velocity between Pre/Post for damage callbacks to work.
+			// Fake the velocities for both objects during PreCollision so the game gets a proper
+			// Pre/Post delta for damage callbacks.
 			JPH::Vec3 object1Vel = pObj1->FakeJoltLinearVelocity( event.m_Data.GetObject1PreCollisionVelocity() );
 			JPH::Vec3 object2Vel = pObj2->FakeJoltLinearVelocity( event.m_Data.GetObject2PreCollisionVelocity() );
 			m_pGameListener->PreCollision( &event.m_Event );
 			pObj1->RestoreJoltLinearVelocity( object1Vel );
 			pObj2->RestoreJoltLinearVelocity( object2Vel );
-		});
 
-		// Send StartTouch events
-		m_StartTouchEvents.ForEach< true >( [ this ]( JoltPhysicsCollisionData& event )
-		{
-			m_pGameListener->StartTouch( event.GetPair().pObject1, event.GetPair().pObject2, &event );
-		});
-
-		// Send EnterTrigger events
-		m_EnterTriggerEvents.ForEach< true >( [ this ]( JoltPhysicsContactPair& event )
-		{
-			m_pGameListener->ObjectEnterTrigger( event.pObject1, event.pObject2 );
-		});
-
-		// Send FluidStartTouch events
-		m_FluidStartTouchEvents.ForEach< true >( [ this ]( JoltPhysicsContactPair& event )
-		{
-			m_pGameListener->FluidStartTouch( event.pObject2, event.pObject1->GetFluidController() );
-		});
-
-		// Send PostCollision events
-		//
-		// Clear it this time as we are done with these!
-		m_CollisionEvents.ForEach< true >( [ this ]( JoltPhysicsCollisionEvent& event )
-		{
-			JoltPhysicsObject *pObj1 = event.m_Data.GetPair().pObject1;
-			JoltPhysicsObject *pObj2 = event.m_Data.GetPair().pObject2;
-
-			// The game samples post-collision velocities during this callback (the
-			// deltaV term of player crush damage). For player-controlled objects the
-			// body velocity is the position-derived correction, capped only by
-			// vjolt_character_max_effective_velocity -- still a phantom. Fake it to
-			// the CONTACT-TIME game-driven velocity stored in the event, mirroring the
-			// PreCollision faking above: the player's own deltaV then reads ~zero
-			// (IVP parity -- the converged controller barely deflects), and using the
-			// stored flag/velocity keeps pre/post self-consistent even if the
-			// controller detached or zeroed its state earlier in this flush.
+			// The game samples post-collision velocities during PostCollision (the deltaV term of
+			// player crush damage). For player-controlled objects the body velocity is the
+			// position-derived correction (a phantom), so fake it to the CONTACT-TIME game-driven
+			// velocity stored in the event, mirroring the PreCollision faking: the player's own
+			// deltaV then reads ~zero (IVP parity), and using the stored flag/velocity keeps
+			// pre/post self-consistent even if the controller detached earlier in this flush.
 			const bool bFake1 = event.m_Data.IsObject1PlayerDriven();
 			const bool bFake2 = event.m_Data.IsObject2PlayerDriven();
 
@@ -566,12 +585,40 @@ public:
 				pObj2->RestoreJoltLinearVelocity( realVel2 );
 		});
 
+		// Send StartTouch events
+		m_StartTouchEvents.ForEach< true >( [ this ]( JoltPhysicsCollisionData& event )
+		{
+			if ( ShouldSkipFreedEvent( event.GetPair().pObject1, event.GetPair().pObject2 ) )
+				return;
+			m_pGameListener->StartTouch( event.GetPair().pObject1, event.GetPair().pObject2, &event );
+		});
+
+		// Send EnterTrigger events
+		m_EnterTriggerEvents.ForEach< true >( [ this ]( JoltPhysicsContactPair& event )
+		{
+			if ( ShouldSkipFreedEvent( event.pObject1, event.pObject2 ) )
+				return;
+			m_pGameListener->ObjectEnterTrigger( event.pObject1, event.pObject2 );
+		});
+
+		// Send FluidStartTouch events
+		m_FluidStartTouchEvents.ForEach< true >( [ this ]( JoltPhysicsContactPair& event )
+		{
+			if ( ShouldSkipFreedEvent( event.pObject1, event.pObject2 ) )
+				return;
+			m_pGameListener->FluidStartTouch( event.pObject2, event.pObject1->GetFluidController() );
+		});
+
 		// Send Friction events. The game uses these to drive scrape sounds and
 		// particle effects on sustained sliding contacts.
 		m_FrictionEvents.ForEach< true >( [ this ]( JoltPhysicsFrictionEvent& event )
 		{
 			JoltPhysicsObject *pObj1 = event.m_Data.GetPair().pObject1;
 			JoltPhysicsObject *pObj2 = event.m_Data.GetPair().pObject2;
+			// Guard BEFORE the GetMaterialIndex() derefs below -- those read the wrapper directly, so a
+			// freed pObj here is a read-after-free inside vphysics, not just a bad pointer to the engine.
+			if ( ShouldSkipFreedEvent( pObj1, pObj2 ) )
+				return;
 			const int nMtl1 = pObj1->GetMaterialIndex();
 			const int nMtl2 = pObj2->GetMaterialIndex();
 		#if !defined( GAME_GMOD_64X )
@@ -589,18 +636,24 @@ public:
 		// Send EndTouch events
 		m_EndTouchEvents.ForEach< true >( [ this ]( JoltPhysicsCollisionData& event )
 		{
+			if ( ShouldSkipFreedEvent( event.GetPair().pObject1, event.GetPair().pObject2 ) )
+				return;
 			m_pGameListener->EndTouch( event.GetPair().pObject1, event.GetPair().pObject2, &event );
 		});
 
 		// Send LeaveTrigger events
 		m_LeaveTriggerEvents.ForEach< true >( [ this ]( JoltPhysicsContactPair& event )
 		{
+			if ( ShouldSkipFreedEvent( event.pObject1, event.pObject2 ) )
+				return;
 			m_pGameListener->ObjectLeaveTrigger( event.pObject1, event.pObject2 );
 		});
 
 		// Send FluidEndTouch events
 		m_FluidEndTouchEvents.ForEach< true >( [ this ]( JoltPhysicsContactPair& event )
 		{
+			if ( ShouldSkipFreedEvent( event.pObject1, event.pObject2 ) )
+				return;
 			m_pGameListener->FluidEndTouch( event.pObject2, event.pObject1->GetFluidController() );
 		});
 
@@ -699,6 +752,13 @@ private:
 
 	IPhysicsCollisionEvent	*m_pGameListener = nullptr;
 	IPhysicsCollisionSolver *m_pGameSolver = nullptr;
+
+#if GAME_GMOD
+	// Snapshotted at the top of FlushCallbacks and read by the dispatch lambdas, so the
+	// mid-flush-free validity guard costs one int compare per event unless an object is actually
+	// destroyed during the flush.
+	uint32 m_nFlushDestroyGenStart = 0u;
+#endif
 
 	std::mutex m_ShouldCollideLock;
 	std::shared_mutex m_ShouldCollideCacheLock;

@@ -35,6 +35,14 @@ static ConVar vjolt_object_debug( "vjolt_object_debug", "0", FCVAR_NONE, "Log di
 // NOTE: Perferably gmod will use the SetLuaReference function
 // & use the IGModPhysicsObjectEvent::ObjectDestroyed callback to invalidate references instead
 static std::unordered_set< JoltPhysicsObject* > g_pObjects;
+
+// Bumped on every physics-object destruction. FlushCallbacks snapshots this at the start of a
+// flush and only pays the per-event IsValidPhyiscsObject lookups if it changes DURING the flush
+// (i.e. a game callback freed an object mid-dispatch). On the overwhelming majority of frames it
+// is unchanged, so the collision-event validity guard costs a single integer compare per event.
+// Plain uint32 (not atomic): only touched on the main thread, same as g_pObjects.
+uint32 g_JoltObjectDestroyGeneration = 0u;
+
 inline void RegisterPhysicsObject( JoltPhysicsObject* pObject )
 {
 	auto it = g_pObjects.find(pObject);
@@ -46,7 +54,10 @@ inline void UnregisterPhysicsObject( JoltPhysicsObject* pObject )
 {
 	auto it = g_pObjects.find(pObject);
 	if (it != g_pObjects.end())
+	{
 		g_pObjects.erase(it);
+		++g_JoltObjectDestroyGeneration;
+	}
 }
 
 bool IsValidPhyiscsObject( IPhysicsObject* pObject ) // for vjolt_interface.cpp to use
