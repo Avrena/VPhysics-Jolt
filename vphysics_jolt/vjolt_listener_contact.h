@@ -72,6 +72,17 @@ public:
 		// to satisfy the StartTouch/EndTouch events.
 		ioSettings.mIsSensor = !bShouldCollide || ioSettings.mIsSensor;
 
+		// Contact-pair data for friction snapshots must accumulate on Added as
+		// well as Persisted: the per-pair map is cleared every step and Jolt
+		// re-adds manifolds for moving contacts (a rolling wheel fires Added,
+		// not Persisted, on many ticks) -- without this, wheel load flickers to
+		// zero mid-roll and PhysObj:GetStress()-style ground checks drop out.
+		if ( !ioSettings.mIsSensor )
+		{
+			JPH::CollisionEstimationResult estimate;
+			EstimateAndAccumulateContactImpulse( inBody1, inBody2, inManifold, ioSettings, estimate );
+		}
+
 		if ( !m_pGameListener )
 			return;
 
@@ -177,28 +188,9 @@ public:
 		if ( ioSettings.mIsSensor )
 			return;
 
-		if ( !vjolt_contact_estimate.GetBool() )
-			return;
-
-		// Estimate the resolved contact and friction impulses for this manifold.
-		// Jolt doesn't expose post-solve constraint impulses cheaply, so we run a few
-		// iterations of the same impulse solver via EstimateCollisionResponse to get
-		// per-tick estimates - used both for friction sound events and for
-		// IPhysicsFrictionSnapshot::GetNormalForce / GetEnergyAbsorbed feedback.
 		JPH::CollisionEstimationResult result;
-		JPH::EstimateCollisionResponse( inBody1, inBody2, inManifold, result,
-			ioSettings.mCombinedFriction, ioSettings.mCombinedRestitution,
-			/*minVelocityForRestitution*/ 1.0f, /*numIterations*/ 4 );
-
-		// Sum normal impulse across contact points and stash on each body for the
-		// friction snapshot to read. IVP exposes get_vert_force per contact; this is
-		// the closest equivalent we can produce in Jolt.
-		float flNormalImpulseSum = 0.0f;
-		for ( const JPH::CollisionEstimationResult::Impulse &imp : result.mImpulses )
-			flNormalImpulseSum += imp.mContactImpulse;
-
-		pObject1->AccumulateContactNormalImpulse( pObject2, flNormalImpulseSum );
-		pObject2->AccumulateContactNormalImpulse( pObject1, flNormalImpulseSum );
+		if ( !EstimateAndAccumulateContactImpulse( inBody1, inBody2, inManifold, ioSettings, result ) )
+			return;
 
 		if ( !m_pGameListener )
 			return;
@@ -310,6 +302,60 @@ public:
 		// to retrieve the contact point and normal, then just never uses it
 		// so we can return anything we want and it will change *nothing*!
 		m_EndTouchEvents.EmplaceBack( uThreadId, JoltPhysicsCollisionInfo( pObject1, pObject2 ) );
+	}
+
+	// Estimate the resolved contact impulses for this manifold and accumulate
+	// them on both bodies' per-pair maps -- this is what feeds
+	// IPhysicsFrictionSnapshot (CalculateObjectStress / PhysObj:GetStress /
+	// crush-stress damage) now that snapshots read tracked pairs instead of
+	// re-running narrow phase. Jolt doesn't expose post-solve constraint
+	// impulses cheaply, so we run a few iterations of the same impulse solver
+	// via EstimateCollisionResponse. Returns false if estimation was skipped
+	// (kill-switch off, or a player-controller pair).
+	//
+	// Character (player controller) pairs are skipped deliberately: the
+	// character body's velocity is the shadow-controller correction velocity,
+	// which spikes to thousands of u/s whenever the player is blocked or
+	// penetrating (the same artifact class the collision-event path guards
+	// against), so estimating against it records phantom forces. Player
+	// impact/crush damage flows through the collision event path instead; this
+	// also stops phantom player scrape/friction sound events.
+	bool EstimateAndAccumulateContactImpulse( const JPH::Body &inBody1, const JPH::Body &inBody2, const JPH::ContactManifold &inManifold, const JPH::ContactSettings &inSettings, JPH::CollisionEstimationResult &result )
+	{
+		if ( !vjolt_contact_estimate.GetBool() )
+			return false;
+
+		JoltPhysicsObject *pObject1 = reinterpret_cast< JoltPhysicsObject * >( inBody1.GetUserData() );
+		JoltPhysicsObject *pObject2 = reinterpret_cast< JoltPhysicsObject * >( inBody2.GetUserData() );
+
+		if ( ( pObject1->GetCallbackFlags() & CALLBACK_IS_PLAYER_CONTROLLER ) ||
+		     ( pObject2->GetCallbackFlags() & CALLBACK_IS_PLAYER_CONTROLLER ) )
+			return false;
+
+		JPH::EstimateCollisionResponse( inBody1, inBody2, inManifold, result,
+			inSettings.mCombinedFriction, inSettings.mCombinedRestitution,
+			/*minVelocityForRestitution*/ 1.0f, /*numIterations*/ 4 );
+
+		// Sum normal impulse across contact points. IVP exposes get_vert_force
+		// per contact; this is the closest equivalent we can produce in Jolt.
+		float flNormalImpulseSum = 0.0f;
+		for ( const JPH::CollisionEstimationResult::Impulse &imp : result.mImpulses )
+			flNormalImpulseSum += imp.mContactImpulse;
+
+		// mWorldSpaceNormal points from body 1 toward body 2 ("direction to move
+		// body 2 out of collision"), so each side stores its own self->other
+		// impulse vector. The vector form is what CalculateObjectStress needs:
+		// it only ever consumes GetSurfaceNormal() * GetNormalForce() summed per
+		// contacting object, so one snapshot entry per pair carrying
+		// sum(normal_i * impulse_i) reproduces its aggregation exactly.
+		const JPH::Vec3 vImpulseJolt = inManifold.mWorldSpaceNormal * flNormalImpulseSum;
+		const Vector vImpulse1 = Vector( vImpulseJolt.GetX(), vImpulseJolt.GetY(), vImpulseJolt.GetZ() );
+		const Vector vContactPoint = JoltToSource::Distance( inManifold.GetWorldSpaceContactPointOn1( 0 ) );
+
+		pObject1->AccumulateContactImpulse( pObject2, vImpulse1, vContactPoint );
+		pObject2->AccumulateContactImpulse( pObject1, -vImpulse1, vContactPoint );
+
+		return true;
 	}
 
 	static inline uint64_t MakeCacheKey(JoltPhysicsObject *pObject0, JoltPhysicsObject *pObject1)

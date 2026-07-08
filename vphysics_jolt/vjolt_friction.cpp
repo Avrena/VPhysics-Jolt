@@ -2,84 +2,24 @@
 #include "cbase.h"
 
 #include "vjolt_friction.h"
-#include "vjolt_layers.h"
 #include "vjolt_object.h"
 #include "vjolt_environment.h"
-#include "vjolt_listener_contact.h"
 #include "vjolt_surfaceprops.h"
 
 #include "tier0/memdbgon.h"
 
-// Friction snapshots re-run a full narrow-phase CollideShape query against the
-// world on EVERY snapshot creation. The engine's CalculateObjectStress (player
-// crush damage, CBasePlayer::VPhysicsUpdate) creates snapshots for the player
-// AND every touching object, per player, per tick -- on a crowded server with
-// piled objects this goes quadratic and melts the main thread (observed live:
-// multi-second frames with ~all samples inside this query). 0 disables
-// populating snapshots (stress/crush damage sees no contacts) until snapshots
-// are rebuilt from tracked contact-listener pairs like IVP does.
+// Friction snapshots are built from the contact listener's per-pair impulse
+// accumulation for the most recent simulation step -- IVP parity: IVP reads its
+// existing contact pairs. The previous implementation re-ran a full narrow-phase
+// CollideShape query on EVERY snapshot creation; the engine's
+// CalculateObjectStress (player crush damage, CBasePlayer::VPhysicsUpdate)
+// creates snapshots for the player AND every touching object, per player, per
+// tick, so on a crowded server with piled objects that went quadratic and
+// melted the main thread (observed live: multi-second frames with ~all samples
+// inside the query). The pair-map copy is O(contacts of self) with no collision
+// work. NOTE: pair data is only populated while vjolt_contact_estimate is 1.
 static ConVar vjolt_friction_snapshot( "vjolt_friction_snapshot", "1", FCVAR_NONE,
-	"Populate friction snapshots (used by CalculateObjectStress / crush damage). 0 = empty snapshots (cheap)." );
-
-namespace
-{
-	class FrictionSnapshotCollector final : public JPH::CollideShapeCollector
-	{
-	public:
-		FrictionSnapshotCollector( JoltPhysicsObject *pSelf, JPH::PhysicsSystem *pSystem,
-			std::vector< JoltPhysicsFrictionSnapshot::Contact > &contacts )
-			: m_pSelf( pSelf )
-			, m_pSystem( pSystem )
-			, m_contacts( contacts )
-		{
-		}
-
-		void AddHit( const JPH::CollideShapeResult &inResult ) override
-		{
-			JPH::BodyLockRead lock( m_pSystem->GetBodyLockInterfaceNoLock(), inResult.mBodyID2 );
-			if ( !lock.Succeeded() )
-				return;
-
-			const JPH::Body &body = lock.GetBody();
-			JoltPhysicsObject *pOther = reinterpret_cast< JoltPhysicsObject * >( body.GetUserData() );
-			if ( !pOther || pOther == m_pSelf )
-				return;
-
-			JoltPhysicsContactListener *pListener = m_pSelf->GetJoltEnvironment()->GetContactListener();
-			if ( !pListener->ShouldCollide( m_pSelf, pOther ) )
-				return;
-
-			JPH::Vec3 axis = inResult.mPenetrationAxis.NormalizedOr( JPH::Vec3::sAxisZ() );
-
-			JoltPhysicsFrictionSnapshot::Contact c;
-			c.pOther = pOther;
-			c.vNormal = Vector( axis.GetX(), axis.GetY(), axis.GetZ() );
-			c.vContactPoint = JoltToSource::Distance( inResult.mContactPointOn2 );
-			c.flPenetrationDepth = inResult.mPenetrationDepth;
-			m_contacts.push_back( c );
-		}
-
-	private:
-		JoltPhysicsObject *m_pSelf;
-		JPH::PhysicsSystem *m_pSystem;
-		std::vector< JoltPhysicsFrictionSnapshot::Contact > &m_contacts;
-	};
-
-	class FrictionSnapshotFilter final : public JPH::BodyFilter
-	{
-	public:
-		explicit FrictionSnapshotFilter( JoltPhysicsObject *pSelf ) : m_pSelf( pSelf ) {}
-
-		bool ShouldCollideLocked( const JPH::Body &inBody ) const override
-		{
-			JoltPhysicsObject *pObject = reinterpret_cast< JoltPhysicsObject * >( inBody.GetUserData() );
-			return pObject != m_pSelf;
-		}
-
-	private:
-		JoltPhysicsObject *m_pSelf;
-	};
-}
+	"Populate friction snapshots from tracked contact pairs (CalculateObjectStress / PhysObj:GetStress / crush damage). 0 = empty snapshots." );
 
 //-------------------------------------------------------------------------------------------------
 
@@ -92,37 +32,34 @@ JoltPhysicsFrictionSnapshot::JoltPhysicsFrictionSnapshot( JoltPhysicsObject *pOb
 	if ( !vjolt_friction_snapshot.GetBool() )
 		return;
 
-	JPH::PhysicsSystem *pSystem = pObject->GetJoltEnvironment()->GetPhysicsSystem();
+	// Sleeping bodies get no contact callbacks, so their pair data is stale and
+	// GetFreshContactPairs rejects it -- they report no contacts, matching the
+	// rest of this module's event behavior (and avoiding stale pointers).
+	std::vector< JoltPhysicsObject::ContactPairData > pairs;
+	if ( !pObject->GetFreshContactPairs( pairs ) )
+		return;
 
-	JPH::DefaultBroadPhaseLayerFilter broadphase_layer_filter = pSystem->GetDefaultBroadPhaseLayerFilter( Layers::MOVING );
-	JPH::DefaultObjectLayerFilter object_layer_filter = pSystem->GetDefaultLayerFilter( Layers::MOVING );
+	// Impulses accumulate across all collision substeps of one Simulate call,
+	// so the step time (not the substep time) converts them to force.
+	float flDt = pObject->GetJoltEnvironment()->GetSimulationTimestep();
+	if ( flDt <= 0.0f )
+		flDt = 1.0f / 60.0f;
 
-	JPH::Vec3 position;
-	JPH::Quat rotation;
-	JPH::BodyInterface &bi = pSystem->GetBodyInterfaceNoLock();
-	bi.GetPositionAndRotation( pObject->GetBodyID(), position, rotation );
-	JPH::Mat44 query_transform = JPH::Mat44::sRotationTranslation(
-		rotation, position + rotation * pObject->GetBody()->GetShape()->GetCenterOfMass() );
+	m_contacts.reserve( pairs.size() );
+	for ( const JoltPhysicsObject::ContactPairData &pair : pairs )
+	{
+		const float flImpulse = pair.vImpulse.Length(); // kg*m/s over the step
+		if ( flImpulse <= 1e-6f )
+			continue;
 
-	JPH::CollideShapeSettings settings;
-	settings.mActiveEdgeMode = JPH::EActiveEdgeMode::CollideOnlyWithActive;
-	settings.mActiveEdgeMovementDirection = bi.GetLinearVelocity( pObject->GetBodyID() );
-	settings.mBackFaceMode = JPH::EBackFaceMode::IgnoreBackFaces;
-	settings.mMaxSeparationDistance = 0.025f;
-
-	FrictionSnapshotCollector collector( pObject, pSystem, m_contacts );
-	FrictionSnapshotFilter filter( pObject );
-
-	pSystem->GetNarrowPhaseQueryNoLock().CollideShape(
-		pObject->GetBody()->GetShape(),
-		JPH::Vec3::sReplicate( 1.0f ),
-		query_transform,
-		settings,
-		JPH::Vec3::sZero(),
-		collector,
-		broadphase_layer_filter,
-		object_layer_filter,
-		filter );
+		Contact c;
+		c.pOther = pair.pOther;
+		c.vNormal = pair.vImpulse / flImpulse;
+		c.vContactPoint = pair.vContactPoint;
+		c.flPenetrationDepth = 0.0f;
+		c.flNormalForce = JoltToSource::Distance( flImpulse / flDt );
+		m_contacts.push_back( c );
+	}
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -179,14 +116,11 @@ float JoltPhysicsFrictionSnapshot::GetNormalForce()
 	if ( !IsValid() )
 		return 0.0f;
 
-	JoltPhysicsObject *pOther = m_contacts[ m_index ].pOther;
-	if ( !pOther )
-		return 0.0f;
-
-	const float flImpulse_N_s = m_pSelf->GetLastContactNormalImpulse( pOther );
-	constexpr float kAssumedStepDt = 1.0f / 60.0f;
-	const float flForce_N = flImpulse_N_s / kAssumedStepDt;
-	return JoltToSource::Distance( flForce_N );
+	// Computed at snapshot build from the pair's accumulated impulse vector;
+	// GetSurfaceNormal() * GetNormalForce() reproduces sum(normal_i * force_i)
+	// over the pair's contacts exactly, which is the only aggregate
+	// CalculateObjectStress consumes.
+	return m_contacts[ m_index ].flNormalForce;
 }
 
 float JoltPhysicsFrictionSnapshot::GetEnergyAbsorbed()
@@ -224,7 +158,13 @@ void JoltPhysicsFrictionSnapshot::ClearFrictionForce()
 	{
 		JoltPhysicsObject *pOther = m_contacts[ m_index ].pOther;
 		if ( pOther )
+		{
+			// Erase BOTH sides: every map-erase path must stay symmetric or the
+			// pairing invariant the destructor's partner scrub relies on breaks
+			// (an asymmetric fresh entry could later surface a dangling pointer).
 			m_pSelf->ClearContactImpulsesFor( pOther );
+			pOther->ClearContactImpulsesFor( m_pSelf );
+		}
 		m_pSelf->Wake();
 	}
 }

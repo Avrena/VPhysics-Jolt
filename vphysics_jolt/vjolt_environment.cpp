@@ -850,10 +850,6 @@ void JoltPhysicsEnvironment::Simulate( float deltaTime )
 	if ( deltaTime == 0.0f )
 		return;
 
-	// Advance the per-body contact-impulse tick so the contact listener clears
-	// stale impulses on first Accumulate call this tick.
-	JoltPhysicsObject::AdvanceContactImpulseTick();
-
 	// Advance the listener's pair-collision clock (drives the deltaCollisionTime
 	// reported on impact events).
 	m_ContactListener.AdvanceSimulationTime( deltaTime );
@@ -906,6 +902,10 @@ void JoltPhysicsEnvironment::Simulate( float deltaTime )
 			int nIterCount = 0;
 			while ( m_PhysicsSystem.GetNumActiveBodies( JPH::EBodyType::RigidBody ) && nIterCount < MaxInitialIterations )
 			{
+				// Advance per-iteration so contact-pair data never accumulates
+				// across settle iterations (a snapshot right after load would
+				// otherwise report forces inflated by the iteration count).
+				AdvanceContactDataTick();
 				m_PhysicsSystem.Update( InitialIterationTimescale, InitialSubSteps, tempAllocator, jobSystem );
 				nIterCount++;
 			}
@@ -913,12 +913,14 @@ void JoltPhysicsEnvironment::Simulate( float deltaTime )
 		else
 		{
 			// Move things around!
+			AdvanceContactDataTick();
 			m_PhysicsSystem.Update( deltaTime, nCollisionSubSteps, tempAllocator, jobSystem );
 		}
 	}
 	else
 	{
 		// Move things around!
+		AdvanceContactDataTick();
 		m_PhysicsSystem.Update( deltaTime, nCollisionSubSteps, tempAllocator, jobSystem );
 	}
 	m_ContactListener.FlushCallbacks();

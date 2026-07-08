@@ -36,6 +36,7 @@ public:
 		Vector vNormal;
 		Vector vContactPoint;
 		float flPenetrationDepth;
+		float flNormalForce; // Source force units (kg*in/s^2), computed at snapshot build
 	};
 
 private:

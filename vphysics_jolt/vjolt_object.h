@@ -339,26 +339,38 @@ private:
 	CUtlVector< IJoltObjectDestroyedListener * > m_destroyedListeners;
 
 public:
-	// Per-other-body, last tick's accumulated contact impulses. Updated from the
-	// contact listener (multi-threaded) and read by JoltPhysicsFrictionSnapshot.
-	// Cleared lazily each Simulate before contact callbacks run.
+	// Per-other-body contact data accumulated during the last simulation step.
+	// Updated from the contact listener (multi-threaded) and read by
+	// JoltPhysicsFrictionSnapshot. Cleared lazily each Simulate before contact
+	// callbacks run.
 	struct ContactImpulse
 	{
-		float flNormalImpulse = 0.0f;   // kg*m/s, sum across this pair's contact points
-		float flFrictionEnergy = 0.0f;  // J, from friction event tracking
+		float flFrictionEnergy = 0.0f;      // J, from friction event tracking
+		Vector vImpulse = vec3_origin;      // kg*m/s, sum of (self->other normal * contact impulse) across this pair's manifolds
+		Vector vContactPoint = vec3_origin; // Source units, a representative world contact point
 	};
 
-	// Bumped once per Simulate so the next Accumulate call on each body knows to
-	// drop the previous tick's impulse map before adding new entries.
-	static void AdvanceContactImpulseTick();
+	// One pair as seen by IPhysicsFrictionSnapshot.
+	struct ContactPairData
+	{
+		JoltPhysicsObject *pOther;
+		Vector vImpulse;      // kg*m/s, self->other convention
+		Vector vContactPoint; // Source units
+	};
 
-	// Both of these are called from OnContactPersisted and must perform well
-	void AccumulateContactNormalImpulse( JoltPhysicsObject *pOther, float flImpulse );
+	// Both of these are called from contact callbacks and must perform well
+	void AccumulateContactImpulse( JoltPhysicsObject *pOther, const Vector &vImpulse, const Vector &vContactPoint );
 	void AccumulateContactFrictionEnergy( JoltPhysicsObject *pOther, float flEnergy );
 
-	float GetLastContactNormalImpulse( JoltPhysicsObject *pOther ) const;
 	float GetLastContactFrictionEnergy( JoltPhysicsObject *pOther ) const;
 	void ClearContactImpulsesFor( JoltPhysicsObject *pOther );
+
+	// Copies the pair map into out iff it was refreshed during the most recent
+	// simulation step; returns false (out untouched) otherwise. Sleeping bodies
+	// get no contact callbacks, so their data goes stale rather than empty --
+	// and stale entries may name since-destroyed objects (the destructor scrubs
+	// itself from CURRENT partners only), so stale data must never be surfaced.
+	bool GetFreshContactPairs( std::vector< ContactPairData > &out ) const;
 private:
 	ankerl::unordered_dense::map< JoltPhysicsObject *, ContactImpulse > m_LastContactImpulses;
 	mutable std::mutex m_LastContactImpulsesLock; // Not a shared_mutex since it rarely / almost never happens that it's accessed simultaneously

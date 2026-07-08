@@ -180,6 +180,15 @@ public:
 public:
 	JPH::PhysicsSystem* GetPhysicsSystem() { return &m_PhysicsSystem; }
 
+	// Per-environment clock for the per-body contact-pair data (impulses,
+	// contact points) accumulated by the contact listener. Advanced right
+	// before each PhysicsSystem::Update so bodies lazily drop the previous
+	// step's data on their first accumulate, and so readers (friction
+	// snapshots, the object destructor's partner scrub) can tell fresh data
+	// from stale. Written on the main thread only; read from worker threads.
+	uint32 GetContactDataTick() const { return m_nContactDataTick.load( std::memory_order_relaxed ); }
+	void AdvanceContactDataTick() { m_nContactDataTick.fetch_add( 1, std::memory_order_relaxed ); }
+
 	JoltPhysicsDragController* GetDragController() { return m_pDragController; }
 
 	void ObjectTransferHandOver( JoltPhysicsObject* pObject );
@@ -230,6 +239,8 @@ private:
 	bool m_bUseLinearCast = true;
 	bool m_bUseEnhancedEdgeDetection = true;
 	float m_flStepTime = 1.0f / 60.0f;
+
+	std::atomic< uint32 > m_nContactDataTick{ 0 };
 
 	// Owned. Also stored in m_pPhysicsControllers so OnPreSimulate is called.
 	JoltPhysicsDragController* m_pDragController = nullptr;

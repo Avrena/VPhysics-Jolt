@@ -144,6 +144,40 @@ JoltPhysicsObject::~JoltPhysicsObject()
 		m_pEnvironment->GetGModObjectEvents()->ObjectDestroyed( this );
 #endif
 
+	// Scrub ourselves from partners' contact-impulse maps so a friction snapshot
+	// created after this destruction can never surface a dangling pointer.
+	// Accumulation is paired (and every map-erase path is symmetric), so any
+	// partner holding a FRESH entry for us also fresh-holds us in our own map.
+	// Only a FRESH map may be walked: a stale map's keys may themselves point
+	// at since-destroyed objects (a partner that accumulated new contacts after
+	// we went stale, then died, scrubs only its own fresh partners -- not us),
+	// and by the pairing invariant a stale map also means no partner
+	// fresh-holds us, so there is nothing to scrub. Destruction only happens
+	// outside Simulate, so no accumulator can re-add us concurrently.
+	{
+		std::vector< JoltPhysicsObject * > contactPartners;
+		{
+			const uint32 nNow = m_pEnvironment->GetContactDataTick();
+			std::lock_guard< std::mutex > lock( m_LastContactImpulsesLock );
+			if ( m_nLastImpulseTick == nNow )
+			{
+				contactPartners.reserve( m_LastContactImpulses.size() );
+				for ( auto &pair : m_LastContactImpulses )
+					contactPartners.push_back( pair.first );
+			}
+		}
+		for ( JoltPhysicsObject *pPartner : contactPartners )
+		{
+#if GAME_GMOD
+			// Belt-and-braces: pointer-membership test against the live-object
+			// registry (never dereferences a freed pointer).
+			if ( !IsValidPhyiscsObject( pPartner ) )
+				continue;
+#endif
+			pPartner->ClearContactImpulsesFor( this );
+		}
+	}
+
 	RemoveShadowController();
 
 	// Josh:
@@ -1407,20 +1441,9 @@ void JoltPhysicsObject::DestroyFrictionSnapshot( IPhysicsFrictionSnapshot *pSnap
 
 //-------------------------------------------------------------------------------------------------
 
-namespace
-{
-	std::atomic< uint32 > g_nContactImpulseTick{ 0 };
-}
-
-void JoltPhysicsObject::AdvanceContactImpulseTick()
-{
-	g_nContactImpulseTick.fetch_add( 1, std::memory_order_relaxed );
-}
-
 // Caller MUST hold m_LastContactImpulsesLock.
-static inline void TickStampedClear( uint32 &nLastTick, ankerl::unordered_dense::map< JoltPhysicsObject *, JoltPhysicsObject::ContactImpulse > &map )
+static inline void TickStampedClear( uint32 nNow, uint32 &nLastTick, ankerl::unordered_dense::map< JoltPhysicsObject *, JoltPhysicsObject::ContactImpulse > &map )
 {
-	const uint32 nNow = g_nContactImpulseTick.load( std::memory_order_relaxed );
 	if ( nLastTick != nNow )
 	{
 		map.clear();
@@ -1428,28 +1451,39 @@ static inline void TickStampedClear( uint32 &nLastTick, ankerl::unordered_dense:
 	}
 }
 
-void JoltPhysicsObject::AccumulateContactNormalImpulse( JoltPhysicsObject *pOther, float flImpulse )
+void JoltPhysicsObject::AccumulateContactImpulse( JoltPhysicsObject *pOther, const Vector &vImpulse, const Vector &vContactPoint )
 {
+	const uint32 nNow = m_pEnvironment->GetContactDataTick();
 	std::lock_guard< std::mutex > lock( m_LastContactImpulsesLock );
-	TickStampedClear( m_nLastImpulseTick, m_LastContactImpulses );
-	m_LastContactImpulses[ pOther ].flNormalImpulse += flImpulse;
+	TickStampedClear( nNow, m_nLastImpulseTick, m_LastContactImpulses );
+	ContactImpulse &entry = m_LastContactImpulses[ pOther ];
+	entry.vImpulse += vImpulse;
+	entry.vContactPoint = vContactPoint;
 }
 
 void JoltPhysicsObject::AccumulateContactFrictionEnergy( JoltPhysicsObject *pOther, float flEnergy )
 {
+	const uint32 nNow = m_pEnvironment->GetContactDataTick();
 	std::lock_guard< std::mutex > lock( m_LastContactImpulsesLock );
-	TickStampedClear( m_nLastImpulseTick, m_LastContactImpulses );
+	TickStampedClear( nNow, m_nLastImpulseTick, m_LastContactImpulses );
 	m_LastContactImpulses[ pOther ].flFrictionEnergy += flEnergy;
 }
 
-float JoltPhysicsObject::GetLastContactNormalImpulse( JoltPhysicsObject *pOther ) const
+bool JoltPhysicsObject::GetFreshContactPairs( std::vector< ContactPairData > &out ) const
 {
+	const uint32 nNow = m_pEnvironment->GetContactDataTick();
 	std::lock_guard< std::mutex > lock( m_LastContactImpulsesLock );
-	// Stale-tick entries don't get cleared on read (to avoid race with concurrent
-	// accumulators), but they're also never queried for currently-in-contact bodies
-	// (those are refreshed each tick). For non-current bodies the value is irrelevant.
-	auto it = m_LastContactImpulses.find( pOther );
-	return it != m_LastContactImpulses.end() ? it->second.flNormalImpulse : 0.0f;
+	// Stale-tick entries don't get cleared on read (to avoid racing concurrent
+	// accumulators) -- they are simply never surfaced. A stale map means this
+	// body had no contact callbacks during the last step (sleeping, or contact
+	// free), and may hold pointers to since-destroyed objects.
+	if ( m_nLastImpulseTick != nNow )
+		return false;
+
+	out.reserve( m_LastContactImpulses.size() );
+	for ( const auto &pair : m_LastContactImpulses )
+		out.push_back( ContactPairData{ pair.first, pair.second.vImpulse, pair.second.vContactPoint } );
+	return true;
 }
 
 float JoltPhysicsObject::GetLastContactFrictionEnergy( JoltPhysicsObject *pOther ) const
