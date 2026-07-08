@@ -600,6 +600,22 @@ void JoltPhysicsPlayerController::OnPreSimulate( float flDeltaTime )
 
 		m_pCharacter->SetLinearVelocity( SourceToJolt::Distance( vControllerVelocity ) );
 	}
+	else
+	{
+		// IVP parity: an idle controller still holds the shadow against solver noise. If the
+		// carried velocity is left untouched here, contact jitter from awake bodies underfoot
+		// integrates tick over tick into a slow slide that the game's shadow-follow then turns
+		// into real player motion (observed live: players standing on any unfrozen physics
+		// object crept until their feet found brushes; zero drift on brushes or frozen props,
+		// whose bodies do not jitter). Damp the carried velocity down to the ground's own.
+		// Real shoves are unaffected: their displacement happens inside the simulation step
+		// and re-enters as game-driven velocity, which re-enables the controller.
+		Vector vGroundVelocity = JoltToSource::Distance( m_pCharacter->GetGroundVelocity() );
+		Vector vIdleVelocity = ( vOldVelocity - vGroundVelocity ) * Clamp( 1.0f - m_flDampFactor, 0.0f, 1.0f ) + vGroundVelocity;
+		if ( !IsSaneVector( vIdleVelocity, kMaxSaneVelocitySource ) )
+			vIdleVelocity = vec3_origin;
+		m_pCharacter->SetLinearVelocity( SourceToJolt::Distance( vIdleVelocity ) );
+	}
 
 	m_vOldPosition = vOldPosition;
 }
