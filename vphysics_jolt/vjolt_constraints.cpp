@@ -419,7 +419,66 @@ void JoltPhysicsConstraint::InitialiseRagdoll( IPhysicsConstraintGroup *pGroup, 
 
 	JPH::Constraint *pConstraint = nullptr;
 
-	if ( uDOFCount == 0 )
+	if ( ragdoll.onlyAngularLimits )
+	{
+		// "Constrain rotation only" (GMod AdvBallsocket onlyrotation): the relative
+		// POSITION must stay free -- contraptions hang position off ropes/elastics
+		// (or nothing) and constrain only the relative orientation. LVS/simfphys
+		// suspend every wheel on such a constraint to a motion-disabled steer
+		// anchor, so locking translation here (what the Fixed/Hinge/SwingTwist
+		// mappings below all do) welds the whole vehicle to the anchor's spawn
+		// position: wheels spin, vehicle never moves. Jolt's SixDOF constraint
+		// expresses rotation-only directly: leave all translation axes free (the
+		// default) and map each rotation axis to fixed/free/limited.
+		JPH::SixDOFConstraintSettings settings;
+		settings.mSpace = JPH::EConstraintSpace::LocalToBodyCOM;
+
+		settings.mPosition1 = constraintToReference.GetTranslation() - pRefBody->GetShape()->GetCenterOfMass();
+		settings.mAxisX1 = constraintToReference.GetAxisX();
+		settings.mAxisY1 = constraintToReference.GetAxisY();
+
+		settings.mPosition2 = constraintToAttached.GetTranslation() - pAttBody->GetShape()->GetCenterOfMass();
+		settings.mAxisX2 = constraintToAttached.GetAxisX();
+		settings.mAxisY2 = constraintToAttached.GetAxisY();
+
+		// Pyramid keeps the Y/Z swing limits independent per axis, matching the
+		// ragdoll parameter layout (cone would couple them).
+		settings.mSwingType = JPH::ESwingType::Pyramid;
+
+		for ( int i = 0; i < 3; i++ )
+		{
+			const JPH::SixDOFConstraintSettings::EAxis eAxis =
+				static_cast< JPH::SixDOFConstraintSettings::EAxis >( JPH::SixDOFConstraintSettings::EAxis::RotationX + i );
+
+			const float flRange = limits.lAxisLimitsRad[i].GetRange();
+
+			if ( flRange <= DEG2RAD( 1.0f ) )
+			{
+				settings.MakeFixedAxis( eAxis );
+			}
+			else if ( flRange >= DEG2RAD( 359.0f ) )
+			{
+				settings.MakeFreeAxis( eAxis );
+			}
+			else
+			{
+				// Twist (X) supports [-pi, pi]; swing (Y/Z) only [-pi/2, pi/2].
+				const float flCap = ( i == 0 ) ? DEG2RAD( 180.0f ) : DEG2RAD( 90.0f );
+				settings.SetLimitedAxis( eAxis,
+					Max( limits.lAxisLimitsRad[i].Min, -flCap ),
+					Min( limits.lAxisLimitsRad[i].Max, flCap ) );
+			}
+
+			// Per-axis friction torque as specified (kg*in^2/s^2 -> N*m). No
+			// vjolt_ragdoll_min_torque_friction floor here: that floor steadies
+			// ragdoll joints, but on the free axis of a mechanical joint (a
+			// vehicle wheel's spin axis) it would act as a permanent brake.
+			settings.mMaxFriction[ eAxis ] = SourceToJolt::Torque( ragdoll.axes[i].torque );
+		}
+
+		pConstraint = settings.Create( *pRefBody, *pAttBody );
+	}
+	else if ( uDOFCount == 0 )
 	{
 		JPH::FixedConstraintSettings settings;
 		settings.mAutoDetectPoint = true;
@@ -465,11 +524,6 @@ void JoltPhysicsConstraint::InitialiseRagdoll( IPhysicsConstraintGroup *pGroup, 
 		settings.mMaxFrictionTorque = Max( flMinTorqueFriction, SourceToJolt::Torque( ( ragdoll.axes[0].torque + ragdoll.axes[1].torque + ragdoll.axes[2].torque ) / 3.0f ) );
 
 		pConstraint = settings.Create( *pRefBody, *pAttBody );
-	}
-
-	if ( ragdoll.onlyAngularLimits )
-	{
-		Log_Warning( LOG_VJolt, "Only angular limits. Need a way to disable the linear part of the constraint.\n" );
 	}
 
 	const bool bActive = !m_pGroup && ragdoll.constraint.isActive;
