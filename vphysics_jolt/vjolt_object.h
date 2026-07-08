@@ -371,6 +371,12 @@ public:
 	// and stale entries may name since-destroyed objects (the destructor scrubs
 	// itself from CURRENT partners only), so stale data must never be surfaced.
 	bool GetFreshContactPairs( std::vector< ContactPairData > &out ) const;
+
+	// Scrub ourselves from partners' maps (fresh-only walk, see impl) and drop
+	// our own map. Runs on destruction and when leaving an environment: after a
+	// cross-env transfer our stamp would be compared against the DESTINATION
+	// environment's clock, which could read stale source-env pointers as fresh.
+	void ScrubAndClearContactPairs();
 private:
 	ankerl::unordered_dense::map< JoltPhysicsObject *, ContactImpulse > m_LastContactImpulses;
 	mutable std::mutex m_LastContactImpulsesLock; // Not a shared_mutex since it rarely / almost never happens that it's accessed simultaneously

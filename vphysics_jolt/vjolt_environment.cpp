@@ -1182,6 +1182,12 @@ bool JoltPhysicsEnvironment::TransferObject( IPhysicsObject *pObject, IPhysicsEn
 	bodyInterface.RemoveBody( pJoltObject->GetBodyID() );
 	m_bObjectListDirty = true;
 
+	// The contact-pair map holds THIS environment's partner pointers stamped
+	// under THIS environment's clock; compared against the destination's clock
+	// it could read as fresh and surface foreign (independently freeable)
+	// pointers. Scrub and drop it while we still know the right clock.
+	pJoltObject->ScrubAndClearContactPairs();
+
 	pJoltEnv->ObjectTransferHandOver( pJoltObject );
 	pJoltObject->UpdateEnvironment( pJoltEnv );
 
