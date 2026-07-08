@@ -53,6 +53,65 @@ CPhysConvex *ShapeSettingsToPhysConvex( const T& settings )
 	return CPhysConvex::FromConvexShape( ShapeSettingsToShape< JPH::ConvexShape >( settings ) );
 }
 
+namespace
+{
+	// Cache of bbox collides, keyed by quantized extents -- IVP parity. Game code
+	// (PhysCreateBbox -> CPhysSaveRestoreBlockHandler::NoteBBox) inserts every
+	// DISTINCT returned pointer into a 64k-capped, pointer-keyed CUtlRBTree and
+	// never removes entries, relying on vphysics' internal bbox cache to keep
+	// repeated extents pointer-identical. Without the cache, per-tick Lua
+	// Player:SetHull overflowed that tree in ~30 minutes of uptime
+	// ("CUtlRBTree overflow!" Sys_Error in NoteBBox, observed live) and every
+	// call leaked a shape. Keys quantize to 1/64 unit to collapse float jitter;
+	// cached collides live for the module lifetime and DestroyCollide skips
+	// them, so one caller "destroying" its copy can never dangle another
+	// caller's pointer (IVP behaved the same way).
+	struct BBoxCacheKey
+	{
+		int32 v[6];
+
+		bool operator==( const BBoxCacheKey &other ) const
+		{
+			return memcmp( v, other.v, sizeof( v ) ) == 0;
+		}
+	};
+
+	struct BBoxCacheKeyHash
+	{
+		size_t operator()( const BBoxCacheKey &key ) const
+		{
+			// FNV-1a over the 6 quantized ints.
+			uint32 uHash = 2166136261u;
+			const uint8 *pBytes = reinterpret_cast< const uint8 * >( key.v );
+			for ( size_t i = 0; i < sizeof( key.v ); i++ )
+				uHash = ( uHash ^ pBytes[i] ) * 16777619u;
+			return uHash;
+		}
+	};
+
+	inline BBoxCacheKey MakeBBoxCacheKey( const Vector &mins, const Vector &maxs )
+	{
+		auto Quantize = []( float flValue ) -> int32
+		{
+			return static_cast< int32 >( lroundf( flValue * 64.0f ) );
+		};
+
+		return BBoxCacheKey{ {
+			Quantize( mins.x ), Quantize( mins.y ), Quantize( mins.z ),
+			Quantize( maxs.x ), Quantize( maxs.y ), Quantize( maxs.z ) } };
+	}
+
+	std::mutex g_BBoxCacheMutex;
+	ankerl::unordered_dense::map< BBoxCacheKey, CPhysCollide *, BBoxCacheKeyHash > g_BBoxCollideCache;
+	ankerl::unordered_dense::set< CPhysCollide * > g_BBoxCollideCacheMembers;
+
+	bool IsCachedBBoxCollide( const CPhysCollide *pCollide )
+	{
+		std::lock_guard< std::mutex > lock( g_BBoxCacheMutex );
+		return g_BBoxCollideCacheMembers.contains( const_cast< CPhysCollide * >( pCollide ) );
+	}
+}
+
 // Creates a JPH::Shape from shape settings, and casts to a CPhysCollide
 template < typename T >
 CPhysCollide *ShapeSettingsToPhysCollide( const T& settings )
@@ -227,6 +286,13 @@ void JoltPhysicsCollision::DestroyCollide( CPhysCollide *pCollide )
 	if ( !pCollide )
 		return;
 
+	// Cached bbox collides are shared by every caller that asked for the same
+	// extents (and by the engine's pointer-keyed bbox bookkeeping) -- they live
+	// for the module lifetime. IVP's DestroyCollide skipped its bbox cache the
+	// same way.
+	if ( IsCachedBBoxCollide( pCollide ) )
+		return;
+
 	JPH::Shape *pShape = pCollide->ToShape();
 
 	// Compound shapes own their sub-shapes via Jolt refs; we own each sub-shape's
@@ -357,7 +423,40 @@ int JoltPhysicsCollision::CollideIndex( const CPhysCollide *pCollide )
 
 CPhysCollide *JoltPhysicsCollision::BBoxToCollide( const Vector &mins, const Vector &maxs )
 {
-	return BBoxToConvex( mins, maxs )->ToPhysCollide();
+	// See the bbox cache block at the top of this file for why repeats MUST
+	// return the same pointer.
+	const BBoxCacheKey key = MakeBBoxCacheKey( mins, maxs );
+
+	{
+		std::lock_guard< std::mutex > lock( g_BBoxCacheMutex );
+		auto it = g_BBoxCollideCache.find( key );
+		if ( it != g_BBoxCollideCache.end() )
+			return it->second;
+	}
+
+	CPhysConvex *pConvex = BBoxToConvex( mins, maxs );
+	if ( !pConvex )
+		return nullptr;
+
+	CPhysCollide *pCollide = pConvex->ToPhysCollide();
+
+	{
+		std::lock_guard< std::mutex > lock( g_BBoxCacheMutex );
+		auto result = g_BBoxCollideCache.try_emplace( key, pCollide );
+		if ( result.second )
+		{
+			g_BBoxCollideCacheMembers.insert( pCollide );
+		}
+		else if ( result.first->second != pCollide )
+		{
+			// Lost a creation race for the same key (main-thread in practice;
+			// belt-and-braces): keep the first, free ours.
+			delete reinterpret_cast< JoltCollideUserData * >( pCollide->ToShape()->GetUserData() );
+			pCollide->ToShape()->Release();
+		}
+
+		return result.first->second;
+	}
 }
 
 int JoltPhysicsCollision::GetConvexesUsedInCollideable( const CPhysCollide *pCollideable, CPhysConvex **pOutputArray, int iOutputArrayLimit )
@@ -1021,10 +1120,9 @@ bool JoltPhysicsCollision::SupportsVirtualMesh()
 
 bool JoltPhysicsCollision::GetBBoxCacheSize( int *pCachedSize, int *pCachedCount )
 {
-	// Josh: We don't use a bbox cache as we have box shapes directly,
-	// and this is only used for debug stats.
-	*pCachedSize = 0;
-	*pCachedCount = 0;
+	std::lock_guard< std::mutex > lock( g_BBoxCacheMutex );
+	*pCachedCount = static_cast< int >( g_BBoxCollideCache.size() );
+	*pCachedSize = static_cast< int >( g_BBoxCollideCache.size() * ( sizeof( BBoxCacheKey ) + sizeof( CPhysCollide * ) + sizeof( JPH::BoxShape ) ) );
 	return true;
 }
 
