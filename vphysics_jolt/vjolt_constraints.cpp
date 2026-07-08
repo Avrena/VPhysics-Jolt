@@ -218,8 +218,12 @@ void JoltPhysicsConstraint::SetAngularMotor( float rotSpeed, float maxAngularImp
 			// :/
 
 			// InitialiseRagdoll creates a Fixed, Hinge or SwingTwist constraint depending on the
-			// number of free axes -- never a SixDOF -- so dispatch on the actual Jolt subtype.
-			// Casting to SixDOF here (as this used to) corrupts memory on $animatedfriction models.
+			// number of free axes -- or a SixDOF for onlyAngularLimits (rotation-only) joints --
+			// so dispatch on the actual Jolt subtype. Blind-casting here (as this used to)
+			// corrupts memory on $animatedfriction models. SixDOF is deliberately left
+			// unmotored below: engine animated-friction never combines with rotation-only
+			// joints, and a motor would re-apply the min-torque-friction floor to what is
+			// typically a free-spinning mechanical axis (vehicle wheels).
 			switch ( m_pConstraint->GetSubType() )
 			{
 				case JPH::EConstraintSubType::SwingTwist:
@@ -462,8 +466,10 @@ void JoltPhysicsConstraint::InitialiseRagdoll( IPhysicsConstraintGroup *pGroup, 
 			}
 			else
 			{
-				// Twist (X) supports [-pi, pi]; swing (Y/Z) only [-pi/2, pi/2].
-				const float flCap = ( i == 0 ) ? DEG2RAD( 180.0f ) : DEG2RAD( 90.0f );
+				// Jolt's swing-twist part accepts the full [-pi, pi] on every
+				// rotation axis; clamp only to keep inverted-window repair
+				// (min > max collapses to locked) unreachable for sane inputs.
+				const float flCap = DEG2RAD( 180.0f );
 				settings.SetLimitedAxis( eAxis,
 					Max( limits.lAxisLimitsRad[i].Min, -flCap ),
 					Min( limits.lAxisLimitsRad[i].Max, flCap ) );
@@ -790,6 +796,16 @@ static void GetConstraintImpulses( const JPH::Constraint *pConstraint, float &ou
 		{
 			auto *p = static_cast< const JPH::PulleyConstraint * >( pConstraint );
 			outLinear = fabsf( p->GetTotalLambdaPosition() );
+			break;
+		}
+		case JPH::EConstraintSubType::SixDOF:
+		{
+			// Rotation-only ragdoll constraints (onlyAngularLimits). Free axes
+			// have inactive constraint parts and report zero lambda, so the
+			// (free) translation part correctly contributes nothing.
+			auto *p = static_cast< const JPH::SixDOFConstraint * >( pConstraint );
+			outLinear = p->GetTotalLambdaPosition().Length();
+			outAngular = p->GetTotalLambdaRotation().Length();
 			break;
 		}
 		default:
