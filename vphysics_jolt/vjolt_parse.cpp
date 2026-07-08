@@ -128,6 +128,8 @@ static const JoltKVSchemaProp_t kVehicleAxleWheelDescs[] =
 {
 	{ "Radius",			KVSCHEMA_DESC( vehicle_wheelparams_t, radius ),				FillFloatProp },
 	{ "Mass",			KVSCHEMA_DESC( vehicle_wheelparams_t, mass ),				FillFloatProp },
+	// Real scripts spell it correctly; keep the historical misspelling as an alias.
+	{ "Inertia",		KVSCHEMA_DESC( vehicle_wheelparams_t, inertia ),			FillFloatProp },
 	{ "Intertia",		KVSCHEMA_DESC( vehicle_wheelparams_t, inertia ),			FillFloatProp },
 	{ "Damping",		KVSCHEMA_DESC( vehicle_wheelparams_t, damping ),			FillFloatProp },
 	{ "RotDamping",		KVSCHEMA_DESC( vehicle_wheelparams_t, rotdamping ),			FillFloatProp },
