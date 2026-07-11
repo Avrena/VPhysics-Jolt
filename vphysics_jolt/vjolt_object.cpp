@@ -7,6 +7,9 @@
 
 #include "cbase.h"
 
+#include <mutex>
+#include <shared_mutex>
+
 #include "vjolt_collide.h"
 #include "vjolt_surfaceprops.h"
 #include "vjolt_friction.h"
@@ -35,16 +38,20 @@ static ConVar vjolt_object_debug( "vjolt_object_debug", "0", FCVAR_NONE, "Log di
 // NOTE: Perferably gmod will use the SetLuaReference function
 // & use the IGModPhysicsObjectEvent::ObjectDestroyed callback to invalidate references instead
 static std::unordered_set< JoltPhysicsObject* > g_pObjects;
+// Validity checks can run from physics callback threads while the game thread creates or destroys
+// objects, so all registry access must be synchronized.
+static std::shared_mutex g_PhysicsObjectsMutex;
 
 // Bumped on every physics-object destruction. FlushCallbacks snapshots this at the start of a
 // flush and only pays the per-event IsValidPhyiscsObject lookups if it changes DURING the flush
 // (i.e. a game callback freed an object mid-dispatch). On the overwhelming majority of frames it
 // is unchanged, so the collision-event validity guard costs a single integer compare per event.
-// Plain uint32 (not atomic): only touched on the main thread, same as g_pObjects.
+// Plain uint32 (not atomic): only read or written on the main thread.
 uint32 g_JoltObjectDestroyGeneration = 0u;
 
 inline void RegisterPhysicsObject( JoltPhysicsObject* pObject )
 {
+	std::unique_lock< std::shared_mutex > lock( g_PhysicsObjectsMutex );
 	auto it = g_pObjects.find(pObject);
 	if (it == g_pObjects.end())
 		g_pObjects.insert(pObject);
@@ -52,6 +59,7 @@ inline void RegisterPhysicsObject( JoltPhysicsObject* pObject )
 
 inline void UnregisterPhysicsObject( JoltPhysicsObject* pObject )
 {
+	std::unique_lock< std::shared_mutex > lock( g_PhysicsObjectsMutex );
 	auto it = g_pObjects.find(pObject);
 	if (it != g_pObjects.end())
 	{
@@ -62,6 +70,7 @@ inline void UnregisterPhysicsObject( JoltPhysicsObject* pObject )
 
 bool IsValidPhyiscsObject( IPhysicsObject* pObject ) // for vjolt_interface.cpp to use
 {
+	std::shared_lock< std::shared_mutex > lock( g_PhysicsObjectsMutex );
 	JoltPhysicsObject *pJoltObject = static_cast< JoltPhysicsObject * >( pObject );
 	return g_pObjects.find( pJoltObject ) != g_pObjects.end();
 }
