@@ -1,105 +1,153 @@
-![VPhysics Jolt Logo](assets/cube_base_nobg.png "VPhysics Jolt")
+![VPhysics Jolt logo](assets/cube_base_nobg.png "VPhysics Jolt")
 
-## What is Volt? ⚡
+# VPhysics Jolt (Volt)
 
-Volt (VPhysics Jolt) is a replacement for Source's VPhysics which uses IVP/Havok using [Jolt Physics](https://github.com/jrouwe/JoltPhysics/)<br>
-Created by [Joshua Ashton (🐸✨)](https://github.com/Joshua-Ashton) [@phys_ballsocket](https://twitter.com/phys_ballsocket) and [Josh Dowell (Slartibarty)](https://github.com/Slartibarty) [@Slartbarty](https://twitter.com/Slartbarty).
+An NCG-maintained, Garry's Mod-focused fork of VPhysics Jolt. Volt replaces
+Source's IVP/Havok-based VPhysics implementation with
+[Jolt Physics](https://github.com/jrouwe/JoltPhysics), with an emphasis on
+compatibility, predictable game behavior, crash containment, and high object counts.
 
-Volt is designed to be incredibly high performance, supporting thousands of objects at once without bringing tick/framerate down to a crawl.
+> [!CAUTION]
+> Volt replaces a core engine component. A successful build does not establish ABI,
+> simulation, or save compatibility for every Source branch. Test on an isolated
+> installation, keep backups, and retain the original VPhysics binaries for rollback.
 
-In our testing, the performance overhead from having thousands of objects moving at once, now comes from the client code needing to update/render, as going out of the PVS of these objects will still cause them to be simulated, but will no longer be rendered.
+## Fork status
 
-## Features
+The default `fixed` branch is the active integration branch. It carries the original
+Volt implementation plus a substantial GMod parity and hardening pass.
 
-Volt is mostly feature complete, but is missing some things such as support for raycast vehicles, breakable constraints, and perhaps other things we've missed!
+| Area | Current focus |
+|---|---|
+| Primary target | Garry's Mod client and dedicated server |
+| Additional CI targets | Source SDK 2013 SP/MP and Alien Swarm |
+| Platforms | Windows and Linux, x86 and x64 where supported by the target SDK |
+| Language/toolchain | C++20; MSVC or GCC |
+| Jolt dependency | Pinned Git submodule at `joltphysics/src` |
 
-It is our goal to implement any missing features at some point.
+Notable work in this fork includes:
 
-Below is a feature table of Volt vs VPhysics and the Bullet VPhysics project.
-If we missed anything we don't support or we do, feel free to add to it.
-It is not meant to be a bash on anyone elses work however, the Bullet VPhysics project was a great inspiration to us!
+- physics-object lifetime and validity tracking compatible with GMod/HolyLib;
+- player-controller, ragdoll, constraint, collision-callback, and IVP behavior parity;
+- contact-pair cleanup and callback hardening during deletion and environment transfer;
+- non-finite/out-of-world body containment and safer allocator/thread behavior;
+- object-list, collision-shape, and contact-query performance improvements;
+- configurable worker-thread and physics tuning controls;
+- CI builds for GMod client and dedicated-server targets on x86 and x64.
 
-| Feature       | VPhysics | Volt (VPhysics Jolt) | Bullet VPhysics |
-|:--------------|:--------:|:-------------:|:---------------:|
-| Constraints (except Pulleys)                                  | ✔️ | ✔️ | ✔️ |
-| Pulleys                                                       | ✔️ | ✔️ | ❌ |
-| Breakable constraints                                         | ✔️ | ❌ | ❌ |
-| Motors (Motion Controllers)                                   | ✔️ | ✔️ | ✔️ |
-| Motors (Constraint)                                           | ✔️ | ✔️ | ❌ |
-| Ragdolls                                                      | ✔️ | ✔️ | ✔️ |
-| Triggers                                                      | ✔️ | ✔️ | ❌ |
-| Object touch callbacks                                        | ✔️ | ✔️ | ❌ |
-| Prop damage/breaking                                          | ✔️ | ✔️ | ❌ |
-| Fluid events                                                  | ✔️ | ✔️ | ❌ |
-| Prop splashing effects                                        | ✔️ | ✔️ | ❌ |
-| Wheeled Vehicles                                              | ✔️ | ✔️ | ✔️ |
-| Raycast Vehicles (ie. Airboat)                                | ✔️ | 〰️ (Airboat implemented) | 〰️ (janky) |
-| NPCs/Doors (Shadow Controllers)                               | ✔️ | ✔️ | ✔️ |
-| Save/Restore Support                                          | ✔️ | ✔️ | ❌ |
-| Portal Support                                                | ✔️ | ✔️ | ❌ |
-| Game per-object collide callback support<br>eg. no-collide    | ✔️ | ✔️ | ❌ |
-| Crash-resistant solver                                        | ❌ | ✔️ | (no data) |
-| Supports thousands of objects without lag                     | ❌ | ✔️ | ❌ |
-| Multithreaded                                                 | ❌ | ✔️ | ✔️ (partially) |
-| Proper player controller                                      | ✔️ | ✔️ | ✔️ (partially) |
+## Capability overview
 
-## Bugs
+| Capability | Status | Notes |
+|---|:---:|---|
+| Constraints and pulleys | ✅ | Breakable constraints remain incomplete |
+| Motion and constraint motors | ✅ | Source-facing behavior preserved where implemented |
+| Ragdolls | ✅ | Includes rotation-only constraint and jitter fixes |
+| Triggers and touch callbacks | ✅ | Callback lifetime paths are hardened |
+| Prop damage and breaking | ✅ | Game-driven behavior supported |
+| Fluids and splash events | ✅ | Supported |
+| Wheeled vehicles | ✅ | Supported |
+| Raycast vehicles | ⚠️ | Airboat support exists; broad parity is incomplete |
+| NPCs, doors, and shadow controllers | ✅ | Supported |
+| Save/restore | ✅ | Treat cross-version saves as compatibility-sensitive |
+| Portal integration | ✅ | Supported by the original implementation |
+| Per-object collision filtering | ✅ | Includes game `ShouldCollide` behavior |
+| Multithreaded simulation | ✅ | Worker count can be constrained for deployment needs |
+| Large object counts | ✅ | Designed to avoid stock VPhysics scaling bottlenecks |
 
-VPhysics Jolt is not without its flaws, however. See the [issue tracker](https://github.com/Joshua-Ashton/VPhysics-Jolt/issues) for bugs that are known.
+Volt is intentionally not presented as bug-free or behavior-identical on every engine
+fork. Report missing features and parity differences with a minimal, deterministic
+reproduction.
 
-There are definitely going to be bugs that we don't know about or haven't encountered, or different quirks across engine branches.
+## Installation
 
-## How to build
+Use a build made for the exact engine branch, operating system, architecture, and
+client/server target being deployed.
 
-The Volt code is provided as-is, it is up to you to build it for your SDK, etc.
+1. Download a successful artifact from
+   [GitHub Actions](https://github.com/Avrena/VPhysics-Jolt/actions), or build from source.
+2. Stop the game or dedicated server completely.
+3. Back up the existing VPhysics binaries and any important saves/server data.
+4. Deploy the matching artifact without mixing files from another SDK or architecture.
+5. Start on a staging map and validate startup, spawning, constraints, ragdolls,
+   vehicles, save/restore, cleanup, and shutdown before wider use.
 
-Volt should build fine against Source SDK 2013 and Alien Swarm SDK on a MSVC or GCC compiler with at least C++20 support.
+> [!IMPORTANT]
+> GMod uses interfaces and SDK material that cannot be redistributed in this repository.
+> The CI workflow obtains the compatible SDK layout separately. A generic SDK 2013 build
+> is not a substitute for a GMod-targeted build.
 
-*If you are building directly against the public SDK 2013 and Alien Swarm SDKs, you will need to do minor work to memoverride.cpp to make it compatible with the newer compilers and newer Windows SDKs.*
+## Building
 
-Unfortunately we cannot redistribute the additional code/headers needed to build Volt for games such as Garry's Mod which uses a different VPhysics interface (CS:GO's) to what is found in the Valve-provided public SDKs.
+Clone recursively so the pinned Jolt submodule is present:
 
-For full build instructions pertaining to SDK 2013, refernce [build.md](/build.md).
+```sh
+git clone --recursive https://github.com/Avrena/VPhysics-Jolt.git
+```
 
-## Download
+The supported workflow builds Volt inside a compatible mini Source SDK tree. See
+[`build.md`](build.md) for the Windows and Linux procedure.
 
-Development builds for each commit for SDK2013 SP/MP + ASW are available as artifacts on each commit on GitHub through GitHub Actions.</br>
-Development builds for each commit for Garry's Mod are available on [froggi.es](https://git.froggi.es/joshua/vphysics_jolt_gmod_builds).
+Minimum toolchain expectations:
 
-For each release, binary builds are provided for Garry's Mod and Source SDK 2013 on the [Releases](https://github.com/Joshua-Ashton/VPhysics-Jolt/releases/) page.
+- Visual Studio 2022 and a current Windows SDK on Windows;
+- GCC/G++ 10 or newer plus multilib packages for Linux x86 builds;
+- a C++20-capable compiler;
+- the SDK branch matching the intended game target.
 
-## Media
+The repository workflows are the reference for GMod x86/x64 build layout and artifact
+contents.
 
-### Lots of Melons + Dumpster
-[![Lots of Melons + Dumpster](https://img.youtube.com/vi/gPDQkmfQCsc/0.jpg)](https://www.youtube.com/watch?v=gPDQkmfQCsc "Lots of Melons + Dumpster")
+## Runtime configuration
 
-### Physically Simulated Chain
-[![Physically Simulated Chain](https://img.youtube.com/vi/tVmQTmbSJM0/0.jpg)](https://www.youtube.com/watch?v=tVmQTmbSJM0 "Physically Simulated Chain")
+This fork exposes targeted convars and `VJOLT_CVAR_*` environment overrides for
+selected solver, worker-thread, contact, and compatibility controls. Keep production
+settings explicit and record non-default values in bug reports.
 
-### Lots of Balls Test
-[![Lots of Balls Test](https://img.youtube.com/vi/tYfiTyRtmz8/0.jpg)](https://www.youtube.com/watch?v=tYfiTyRtmz8 "Lots of Balls Test")
+Avoid changing several physics controls at once. Establish a baseline, change one
+variable, and compare behavior and performance using a repeatable map/scenario.
 
-### Wheels + Weld Car Dupe Test
-[![Weld Car Dupe Test](https://img.youtube.com/vi/5_QbbXbIrg8/0.jpg)](https://www.youtube.com/watch?v=5_QbbXbIrg8 "Weld Car Dupe Test")
+## Reporting problems
 
-### Door + NPC (Physics Shadowed Objects) Test
-[![Door + NPC (Physics Shadowed Objects) Test](https://img.youtube.com/vi/SdEj7HTuJmU/0.jpg)](https://www.youtube.com/watch?v=SdEj7HTuJmU "Door + NPC (Physics Shadowed Objects) Test")
+Open an issue in this repository using the bug form. Include:
 
-### Lots of Cubes + Ragdolls + Funnel
-[![Lots of Cubes + Ragdolls + Funnel](https://img.youtube.com/vi/CLVnSwg33Dk/0.jpg)](https://www.youtube.com/watch?v=CLVnSwg33Dk "Lots of Cubes + Ragdolls + Funnel")
+- the exact Volt commit;
+- engine/SDK branch and commit;
+- operating system, architecture, compiler, and build configuration;
+- a minimal map/entity/constraint reproduction;
+- whether the problem also occurs with stock VPhysics;
+- redacted logs or stack traces.
 
-### Slow Mo Cubes
-[![Slow Mo Cubes](https://img.youtube.com/vi/GzW_4bufwEk/0.jpg)](https://www.youtube.com/watch?v=GzW_4bufwEk "Slow Mo Cubes")
+Do not upload credentials, private server details, player data, or raw memory dumps.
 
-### Propane in Dumpster
-[![Propane in Dumpster](https://img.youtube.com/vi/10vvRJVHGQc/0.jpg)](https://www.youtube.com/watch?v=10vvRJVHGQc "Propane in Dumpster")
+## Contributing
 
-*Have some cool media of stuff going on in Volt you'd like to add? Feel free to make a pull request!*
+Pull requests should stay focused and identify every engine/platform target actually
+tested. Changes to ABI assumptions, collision behavior, object lifetime, threading,
+serialization, determinism, save/restore, or the Jolt submodule require explicit risk
+and validation notes.
 
-## Projects using Volt
+External code and ideas must be attributed and license-compatible. Generated projects,
+build output, and binaries do not belong in normal source pull requests.
 
-### [Portal 2: Desolation](https://emberspark.games/desolation/)
+## Lineage and license
 
-### [Prelude: Online](https://prelude.online/)
+Volt was created by [Joshua Ashton](https://github.com/Joshua-Ashton) and
+[Josh Dowell](https://github.com/Slartibarty). This branch descends through
+[`RaphaelIT7/VPhysics-Jolt`](https://github.com/RaphaelIT7/VPhysics-Jolt) and carries
+additional NCG-focused GMod compatibility and hardening work.
 
-# Have fun! 🐸⚡
+The project is licensed under the MIT License. See [`LICENSE`](LICENSE).
+
+<details>
+<summary>Original demonstration videos</summary>
+
+- [Lots of Melons + Dumpster](https://www.youtube.com/watch?v=gPDQkmfQCsc)
+- [Physically Simulated Chain](https://www.youtube.com/watch?v=tVmQTmbSJM0)
+- [Lots of Balls Test](https://www.youtube.com/watch?v=tYfiTyRtmz8)
+- [Weld Car Dupe Test](https://www.youtube.com/watch?v=5_QbbXbIrg8)
+- [Door + NPC physics-shadow test](https://www.youtube.com/watch?v=SdEj7HTuJmU)
+- [Cubes, ragdolls, and funnel](https://www.youtube.com/watch?v=CLVnSwg33Dk)
+- [Slow-motion cubes](https://www.youtube.com/watch?v=GzW_4bufwEk)
+- [Propane in dumpster](https://www.youtube.com/watch?v=10vvRJVHGQc)
+
+</details>
