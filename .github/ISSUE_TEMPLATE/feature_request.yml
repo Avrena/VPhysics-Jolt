@@ -1,0 +1,69 @@
+name: Feature request
+description: Propose a focused physics feature, compatibility improvement, or optimization.
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Start with the game or engine problem. Physics behavior requests should define compatibility and measurable acceptance criteria.
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Primary engine target
+      options:
+        - Source SDK 2013 single-player
+        - Source SDK 2013 multiplayer
+        - Alien Swarm
+        - Garry's Mod
+        - Multiple or other Source branches
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What game behavior, compatibility gap, or performance bottleneck needs to change?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Define expected physics behavior, configuration, failure modes, and representative examples.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance and test plan
+      description: List engine targets, architectures, maps/entities, save/restore cases, stress scenarios, and measurable success criteria.
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and risk
+      description: Cover ABI, determinism, collision/constraint behavior, threading, callbacks, serialization, save compatibility, and performance as relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include stock VPhysics behavior and existing Jolt facilities you evaluated.
+  - type: textarea
+    id: references
+    attributes:
+      label: References and provenance
+      description: Link engine documentation, benchmarks, research, or other implementations and state their licenses.
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I searched existing issues for this request.
+          required: true
+        - label: This request does not rely on redistributing proprietary or license-incompatible code.
+          required: true
+        - label: I included a way to validate compatibility and physics behavior.
+          required: true

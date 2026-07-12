@@ -1,0 +1,103 @@
+name: Bug or crash report
+description: Report a reproducible physics defect, regression, hang, or crash.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. A small deterministic reproduction is much more useful than a large addon collection.
+
+        > **Caution:** VPhysics-Jolt replaces a core engine component. Reproduce on an isolated installation and back up saves and server data first. Do not upload unredacted credentials, private addresses/paths, player data, or full memory dumps.
+  - type: input
+    id: commit
+    attributes:
+      label: VPhysics-Jolt version or commit
+      description: Provide a release name or full commit SHA. Do not write only "latest."
+      placeholder: v2026.07.09-f87b98e or 0123456789abcdef...
+    validations:
+      required: true
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Engine target
+      options:
+        - Source SDK 2013 single-player
+        - Source SDK 2013 multiplayer
+        - Alien Swarm
+        - Garry's Mod client
+        - Garry's Mod dedicated server
+        - Other Source branch
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform and architecture
+      options:
+        - Windows x86
+        - Windows x64
+        - Linux x86
+        - Linux x64
+        - Other or unknown
+    validations:
+      required: true
+  - type: input
+    id: toolchain
+    attributes:
+      label: Compiler and SDK
+      description: Include compiler version, SDK fork/commit, and relevant build configuration.
+      placeholder: MSVC 19.xx, mini-source-sdk gmod-changes @ commit, Release x64
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Give exact steps and identify the map, entities/constraints, object count, relevant cvars, and timing.
+      placeholder: |
+        1. Start ...
+        2. Spawn ...
+        3. Apply ...
+        4. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected physics behavior
+      description: If comparing against stock VPhysics or an earlier commit, identify it precisely.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include frequency, determinism, and the last known working commit if this is a regression.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Paste relevant console output and stack traces. Link large sanitized artifacts instead of attaching a full memory dump.
+      render: shell
+  - type: textarea
+    id: isolation
+    attributes:
+      label: Isolation results
+      description: State whether this reproduces without third-party addons/plugins and whether it reproduces with stock VPhysics.
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I searched existing issues for the same problem.
+          required: true
+        - label: I identified exact repository, engine/SDK, and toolchain versions.
+          required: true
+        - label: I reproduced safely on an isolated installation or have a tested backup and rollback plan.
+          required: true
+        - label: I removed secrets, private addresses/paths, and player-identifying data from every attachment.
+          required: true
