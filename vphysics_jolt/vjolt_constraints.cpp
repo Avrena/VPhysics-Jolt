@@ -40,12 +40,13 @@ static ConVar vjolt_onlyrot_recapture_ticks( "vjolt_onlyrot_recapture_ticks", "2
 	"AFTER constraining them, so the creation-time frames bake the spawn transient in as permanent "
 	"joint error." );
 
-static ConVar vjolt_length_spring_warmup_ticks( "vjolt_length_spring_warmup_ticks", "30", FCVAR_NONE,
+// Diagnostic knob, default off: hardening mid-settle freezes whatever pose the spawn
+// transient left (live trials: 30 ticks @ 8 Hz made LVS tank tilt WORSE, 6/6 vs 7/12
+// baseline). The actual fix for transient-captured contraptions is the gentler
+// vjolt_baumgarte_factor default; see vjolt_environment.cpp.
+static ConVar vjolt_length_spring_warmup_ticks( "vjolt_length_spring_warmup_ticks", "0", FCVAR_NONE,
 	"Give length (rope) constraints soft spring limits for this many simulation steps after "
-	"creation, then harden to rigid. IVP length constraints are inherently compliant; hard "
-	"distance limits let multi-rope suspensions (LVS tanks) lock wheels into the mirror branch "
-	"of the rope-intersection geometry during the spawn transient, permanently tilting the "
-	"vehicle. 0 disables the warmup." );
+	"creation, then harden to rigid. 0 disables the warmup (default)." );
 static ConVar vjolt_length_spring_warmup_frequency( "vjolt_length_spring_warmup_frequency", "8", FCVAR_NONE,
 	"Spring frequency (Hz) of length-constraint limits during the warmup window." );
 static ConVar vjolt_length_spring_warmup_damping( "vjolt_length_spring_warmup_damping", "1.0", FCVAR_NONE,
@@ -756,13 +757,10 @@ void JoltPhysicsConstraint::InitialiseLength( IPhysicsConstraintGroup *pGroup, c
 	//if ( settings.mFrequency )
 	//	settings.mDamping = 1.0f;
 
-	// IVP length constraints are compliant springs at heart; perfectly hard
-	// distance limits are the one place a Lua contraption can wedge itself into
-	// a mirror solution of its rope geometry and never escape (LVS tank wheels
-	// hang on 2 rigid ropes + limiter whose taut set has two intersection
-	// branches -- crossing between them needs a momentary overstretch that IVP
-	// permits and a hard limit forbids). Soften the limits during the spawn
-	// transient, then harden in PostSimulate.
+	// Optional compliance for the distance limits (IVP length constraints are
+	// springs at heart). Both paths default to rigid limits -- these are
+	// diagnostic knobs for contraptions that misbehave under hard ropes; the
+	// warmup variant hardens in PostSimulate.
 	const int nWarmupTicks = vjolt_length_spring_warmup_ticks.GetInt();
 	const float flWarmupFrequency = vjolt_length_spring_warmup_frequency.GetFloat();
 	if ( nWarmupTicks > 0 && flWarmupFrequency > 0.0f )
