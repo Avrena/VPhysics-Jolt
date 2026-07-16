@@ -91,6 +91,7 @@ public:
 private:
 
 	void RecaptureRotOnlyFrames();
+	void HardenLengthSpring();
 
 	void SetGroup( IPhysicsConstraintGroup *pGroup );
 
@@ -107,6 +108,10 @@ private:
 	// one-shot frame re-capture N steps after creation (see vjolt_onlyrot_recapture_ticks).
 	JPH::Ref< JPH::SixDOFConstraintSettings >	m_pRotOnlySettings;
 	int							m_nRotOnlyRecaptureTicks = 0;
+
+	// Length (rope) constraints: countdown until the soft warmup limits harden
+	// (see vjolt_length_spring_warmup_ticks).
+	int							m_nLengthSpringWarmupTicks = 0;
 
 	JoltPhysicsConstraintGroup	*m_pGroup = nullptr;
 
