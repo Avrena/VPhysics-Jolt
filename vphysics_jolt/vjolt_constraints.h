@@ -83,9 +83,14 @@ public:
 
 	void SaveConstraintSettings( JPH::StateRecorder &recorder );
 
+	// Once per environment simulate step, after the Jolt update.
+	void PostSimulate();
+
 	bool CheckBroken();
 
 private:
+
+	void RecaptureRotOnlyFrames();
 
 	void SetGroup( IPhysicsConstraintGroup *pGroup );
 
@@ -97,6 +102,11 @@ private:
 	JoltPhysicsObject			*m_pObjAttached = nullptr;
 	JPH::Ref< JPH::Constraint > m_pConstraint;
 	constraintType_t			m_ConstraintType = CONSTRAINT_UNKNOWN;
+
+	// Rotation-only (onlyAngularLimits) ragdoll joints: settings kept alive for a
+	// one-shot frame re-capture N steps after creation (see vjolt_onlyrot_recapture_ticks).
+	JPH::Ref< JPH::SixDOFConstraintSettings >	m_pRotOnlySettings;
+	int							m_nRotOnlyRecaptureTicks = 0;
 
 	JoltPhysicsConstraintGroup	*m_pGroup = nullptr;
 

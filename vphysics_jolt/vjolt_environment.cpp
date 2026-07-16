@@ -926,7 +926,7 @@ void JoltPhysicsEnvironment::Simulate( float deltaTime )
 	m_ContactListener.FlushCallbacks();
 
 	for ( size_t i = 0, n = m_pConstraints.size(); i < n; ++i )
-		m_pConstraints[i]->CheckBroken();
+		m_pConstraints[i]->PostSimulate();
 
 	const JPH::BodyID *pActiveBodies = m_PhysicsSystem.GetActiveBodiesUnsafe( JPH::EBodyType::RigidBody );
 	uint32_t uActiveBodies = m_PhysicsSystem.GetNumActiveBodies( JPH::EBodyType::RigidBody );

@@ -33,6 +33,13 @@ static ConVar vjolt_constraint_position_substeps( "vjolt_constraint_position_sub
 
 static ConVar vjolt_ragdoll_min_torque_friction( "vjolt_ragdoll_min_torque_friction", "0.05" );
 
+static ConVar vjolt_onlyrot_recapture_ticks( "vjolt_onlyrot_recapture_ticks", "2", FCVAR_NONE,
+	"Re-zero rotation-only (onlyAngularLimits) constraint frames to the bodies' current relative "
+	"orientation this many simulation steps after creation (0 = keep the creation-time capture). "
+	"Lua contraptions (LVS/simfphys) teleport wheels and anchors into their intended pose one tick "
+	"AFTER constraining them, so the creation-time frames bake the spawn transient in as permanent "
+	"joint error." );
+
 static constexpr float UNBREAKABLE_BREAK_LIMIT = 1e12f;
 
 static ConVar vjolt_constraint_break_debug( "vjolt_constraint_break_debug", "0", FCVAR_NONE,
@@ -434,55 +441,88 @@ void JoltPhysicsConstraint::InitialiseRagdoll( IPhysicsConstraintGroup *pGroup, 
 		// position: wheels spin, vehicle never moves. Jolt's SixDOF constraint
 		// expresses rotation-only directly: leave all translation axes free (the
 		// default) and map each rotation axis to fixed/free/limited.
-		JPH::SixDOFConstraintSettings settings;
-		settings.mSpace = JPH::EConstraintSpace::LocalToBodyCOM;
+		JPH::Ref< JPH::SixDOFConstraintSettings > settings = new JPH::SixDOFConstraintSettings;
+		settings->mSpace = JPH::EConstraintSpace::LocalToBodyCOM;
 
-		settings.mPosition1 = constraintToReference.GetTranslation() - pRefBody->GetShape()->GetCenterOfMass();
-		settings.mAxisX1 = constraintToReference.GetAxisX();
-		settings.mAxisY1 = constraintToReference.GetAxisY();
+		settings->mPosition1 = constraintToReference.GetTranslation() - pRefBody->GetShape()->GetCenterOfMass();
+		settings->mAxisX1 = constraintToReference.GetAxisX();
+		settings->mAxisY1 = constraintToReference.GetAxisY();
 
-		settings.mPosition2 = constraintToAttached.GetTranslation() - pAttBody->GetShape()->GetCenterOfMass();
-		settings.mAxisX2 = constraintToAttached.GetAxisX();
-		settings.mAxisY2 = constraintToAttached.GetAxisY();
+		settings->mPosition2 = constraintToAttached.GetTranslation() - pAttBody->GetShape()->GetCenterOfMass();
+		settings->mAxisX2 = constraintToAttached.GetAxisX();
+		settings->mAxisY2 = constraintToAttached.GetAxisY();
 
 		// Pyramid keeps the Y/Z swing limits independent per axis, matching the
 		// ragdoll parameter layout (cone would couple them).
-		settings.mSwingType = JPH::ESwingType::Pyramid;
+		settings->mSwingType = JPH::ESwingType::Pyramid;
 
 		for ( int i = 0; i < 3; i++ )
 		{
 			const JPH::SixDOFConstraintSettings::EAxis eAxis =
 				static_cast< JPH::SixDOFConstraintSettings::EAxis >( JPH::SixDOFConstraintSettings::EAxis::RotationX + i );
 
-			const float flRange = limits.lAxisLimitsRad[i].GetRange();
-
-			if ( flRange <= DEG2RAD( 1.0f ) )
-			{
-				settings.MakeFixedAxis( eAxis );
-			}
-			else if ( flRange >= DEG2RAD( 359.0f ) )
-			{
-				settings.MakeFreeAxis( eAxis );
-			}
-			else
-			{
-				// Jolt's swing-twist part accepts the full [-pi, pi] on every
-				// rotation axis; clamp only to keep inverted-window repair
-				// (min > max collapses to locked) unreachable for sane inputs.
-				const float flCap = DEG2RAD( 180.0f );
-				settings.SetLimitedAxis( eAxis,
-					Max( limits.lAxisLimitsRad[i].Min, -flCap ),
-					Min( limits.lAxisLimitsRad[i].Max, flCap ) );
-			}
+			// Inverted windows (min > max) are emitted systematically by Lua
+			// contraptions -- LVS mirrors every wheel's spin socket with a
+			// min/max-swapped twin -- and IVP tolerated them. Left alone their
+			// negative range would fall into the tiny-window branch below and
+			// hard-weld an axis the author meant to leave (nearly) free, so
+			// normalize by swap and classify the sane window instead.
+			const float flMin = Min( limits.lAxisLimitsRad[i].Min, limits.lAxisLimitsRad[i].Max );
+			const float flMax = Max( limits.lAxisLimitsRad[i].Min, limits.lAxisLimitsRad[i].Max );
+			const float flRange = flMax - flMin;
 
 			// Per-axis friction torque as specified (kg*in^2/s^2 -> N*m). No
 			// vjolt_ragdoll_min_torque_friction floor here: that floor steadies
 			// ragdoll joints, but on the free axis of a mechanical joint (a
 			// vehicle wheel's spin axis) it would act as a permanent brake.
-			settings.mMaxFriction[ eAxis ] = SourceToJolt::Torque( ragdoll.axes[i].torque );
+			settings->mMaxFriction[ eAxis ] = SourceToJolt::Torque( ragdoll.axes[i].torque );
+
+			if ( flRange <= DEG2RAD( 1.0f ) )
+			{
+				// Near-zero windows are IVP's "hold this alignment" idiom
+				// (LVS locks wheel yaw/roll with +/-0.0001deg). IVP's limits are
+				// compliant and let ground contact pull a transient-crooked
+				// capture straight; MakeFixedAxis is an infinitely stiff weld
+				// that locks the capture error in forever. Keep the window but
+				// floor it at +/-0.5deg around its midpoint, with a small
+				// friction floor so the slack doesn't rattle.
+				const float flCenter = 0.5f * ( flMin + flMax );
+				const float flHalfRange = Max( 0.5f * flRange, DEG2RAD( 0.5f ) );
+				settings->SetLimitedAxis( eAxis,
+					Max( flCenter - flHalfRange, -JPH::JPH_PI ),
+					Min( flCenter + flHalfRange, JPH::JPH_PI ) );
+				settings->mMaxFriction[ eAxis ] = Max( settings->mMaxFriction[ eAxis ], flMinTorqueFriction );
+			}
+			else if ( flRange >= DEG2RAD( 359.0f ) )
+			{
+				settings->MakeFreeAxis( eAxis );
+			}
+			else
+			{
+				// Jolt's swing-twist part accepts the full [-pi, pi] on every
+				// rotation axis; clamp to keep SetLimitedAxis inputs sane.
+				const float flCap = DEG2RAD( 180.0f );
+				settings->SetLimitedAxis( eAxis,
+					Max( flMin, -flCap ),
+					Min( flMax, flCap ) );
+			}
 		}
 
-		pConstraint = settings.Create( *pRefBody, *pAttBody );
+		pConstraint = settings->Create( *pRefBody, *pAttBody );
+
+		// The frames above came from Source matrices captured at the Lua call.
+		// LVS/simfphys teleport wheels and steer anchors into their intended
+		// orientation one tick AFTER constraining them (and a 10-wheel tank
+		// stages this over many ticks), so that capture routinely encodes a
+		// mid-transient pose. Schedule a one-shot re-zero of the frames onto
+		// whatever relative orientation the bodies actually hold a few steps
+		// from now.
+		const int nRecaptureTicks = vjolt_onlyrot_recapture_ticks.GetInt();
+		if ( nRecaptureTicks > 0 )
+		{
+			m_pRotOnlySettings = settings;
+			m_nRotOnlyRecaptureTicks = nRecaptureTicks;
+		}
 	}
 	else if ( uDOFCount == 0 )
 	{
@@ -828,6 +868,43 @@ static float MaxInverseMass( JoltPhysicsObject *pA, JoltPhysicsObject *pB )
 	return Max( invMassOf( pA ), invMassOf( pB ) );
 }
 
+void JoltPhysicsConstraint::PostSimulate()
+{
+	RecaptureRotOnlyFrames();
+	CheckBroken();
+}
+
+void JoltPhysicsConstraint::RecaptureRotOnlyFrames()
+{
+	if ( m_nRotOnlyRecaptureTicks <= 0 )
+		return;
+
+	if ( --m_nRotOnlyRecaptureTicks > 0 )
+		return;
+
+	JPH::Ref< JPH::SixDOFConstraintSettings > settings = std::move( m_pRotOnlySettings );
+
+	if ( !settings || !m_pConstraint || !m_pObjReference || !m_pObjAttached )
+		return;
+
+	JPH::Body *pRefBody = m_pObjReference->GetBody();
+	JPH::Body *pAttBody = m_pObjAttached->GetBody();
+
+	// Re-express the attached body's constraint frame in reference-body local
+	// space at the orientations the bodies hold RIGHT NOW, so the pose they have
+	// actually settled into (after LVS's constrain-then-teleport init) becomes
+	// the joint's rest pose instead of whatever the mid-transient capture was.
+	const JPH::Quat qRefToAtt = pRefBody->GetRotation().Conjugated() * pAttBody->GetRotation();
+	settings->mAxisX1 = qRefToAtt * settings->mAxisX2;
+	settings->mAxisY1 = qRefToAtt * settings->mAxisY2;
+
+	const bool bEnabled = m_pConstraint->GetEnabled();
+	m_pPhysicsSystem->RemoveConstraint( m_pConstraint );
+	m_pConstraint = settings->Create( *pRefBody, *pAttBody );
+	m_pConstraint->SetEnabled( bEnabled );
+	m_pPhysicsSystem->AddConstraint( m_pConstraint );
+}
+
 bool JoltPhysicsConstraint::CheckBroken()
 {
 	if ( !m_pConstraint || !m_pConstraint->GetEnabled() )
@@ -906,6 +983,9 @@ void JoltPhysicsConstraint::DestroyConstraint()
 		m_pObjReference->RemoveDestroyedListener( this );
 		m_pObjReference = nullptr;
 	}
+
+	m_pRotOnlySettings = nullptr;
+	m_nRotOnlyRecaptureTicks = 0;
 
 	if ( m_pConstraint )
 	{
