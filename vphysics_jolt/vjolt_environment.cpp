@@ -66,9 +66,10 @@ static ConVar vjolt_deterministic( "vjolt_deterministic", "0", FCVAR_NONE, "Whet
 // Default lowered from Jolt's 0.2: IVP resolves interpenetration far more gently, and
 // multi-body Lua contraptions (e.g. LVS tank suspensions: 10 wheels on ropes+elastics)
 // rely on that. At 0.2 the spawn-time depenetration pop knocks such assemblies into
-// alternate static equilibria they can never leave (permanently tilted hulls); at 0.02
-// they settle level (0/12 tilted vs 7/12 at 0.2 in live spawn trials).
-static ConVar vjolt_baumgarte_factor( "vjolt_baumgarte_factor", "0.02", FCVAR_NONE, "Baumgarte stabilization factor (how much of the position error to 'fix' in 1 update). Changing this may help with constraint stability. Requires a map restart to change.", true, 0.0f, true, 1.0f );
+// alternate static equilibria they can never leave (permanently tilted hulls). Live
+// spawn trials: 0.2 -> 7/12 tilted 7-16 deg; 0.02 -> 2/18 with residuals to 4.7 deg;
+// 0.01 -> 18/18 level (worst 2.2 deg) with props still depenetrating in a few seconds.
+static ConVar vjolt_baumgarte_factor( "vjolt_baumgarte_factor", "0.01", FCVAR_NONE, "Baumgarte stabilization factor (how much of the position error to 'fix' in 1 update). Changing this may help with constraint stability. Requires a map restart to change.", true, 0.0f, true, 1.0f );
 
 //-------------------------------------------------------------------------------------------------
 
