@@ -171,7 +171,10 @@ void JoltPhysicsFluidController::OnPreSimulate( float deltaTime )
 	// Clear out our last list of items
 	ClearCachedObjectsInShape();
 
-	if ( !m_pFluidObject )
+	// Disabled fluid objects must not keep applying buoyancy through the explicit
+	// shape query below. This matters for func_water_analog entities that are
+	// drained by moving the brush and setting it to SOLID_NONE.
+	if ( !m_pFluidObject || !m_pFluidObject->IsCollisionEnabled() )
 		return;
 
 	const cplane_t surfacePlane = GetSurfacePlane();
