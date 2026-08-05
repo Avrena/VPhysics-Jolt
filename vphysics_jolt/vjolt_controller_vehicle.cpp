@@ -597,6 +597,13 @@ JPH::WheeledVehicleControllerSettings *JoltPhysicsVehicleController::CreateVehic
 	// Josh:
 	// T = ( 745.7 * P ) / ( 2 * PI * ( RPM / 60 ) )
 	pController->mEngine.mMaxTorque = ( HorsePowerToWatts * m_VehicleParams.engine.horsepower ) / ( 2.0f * M_PI * ( m_VehicleParams.engine.maxRPM / 60.0f ) );
+	if ( !m_VehicleParams.engine.isAutoTransmission && m_VehicleParams.engine.axleRatio > 0.0f )
+	{
+		// Source disables RPM simulation for these scripts. Applying the axle ratio to Jolt's differential
+		// would instead reduce their terminal speed, so preserve Jolt's speed coupling and scale torque only.
+		const JPH::VehicleDifferentialSettings defaultDifferential;
+		pController->mEngine.mMaxTorque *= m_VehicleParams.engine.axleRatio / defaultDifferential.mDifferentialRatio;
+	}
 	// Josh: Fudge
 	pController->mEngine.mMinRPM = Max( m_VehicleParams.engine.shiftDownRPM - 300, 0.0f );
 	pController->mEngine.mMaxRPM = m_VehicleParams.engine.maxRPM;
@@ -623,7 +630,7 @@ JPH::WheeledVehicleControllerSettings *JoltPhysicsVehicleController::CreateVehic
 		JPH::VehicleDifferentialSettings differential;
 		differential.mLeftWheel			= ( i * m_VehicleParams.wheelsPerAxle );
 		differential.mRightWheel		= ( i * m_VehicleParams.wheelsPerAxle ) + 1;
-		if ( m_VehicleParams.engine.axleRatio > 0.0f )
+		if ( m_VehicleParams.engine.isAutoTransmission && m_VehicleParams.engine.axleRatio > 0.0f )
 			differential.mDifferentialRatio = m_VehicleParams.engine.axleRatio;
 		differential.mEngineTorqueRatio = m_VehicleParams.axles[ i ].torqueFactor;
 
