@@ -623,6 +623,8 @@ JPH::WheeledVehicleControllerSettings *JoltPhysicsVehicleController::CreateVehic
 		JPH::VehicleDifferentialSettings differential;
 		differential.mLeftWheel			= ( i * m_VehicleParams.wheelsPerAxle );
 		differential.mRightWheel		= ( i * m_VehicleParams.wheelsPerAxle ) + 1;
+		if ( m_VehicleParams.engine.axleRatio > 0.0f )
+			differential.mDifferentialRatio = m_VehicleParams.engine.axleRatio;
 		differential.mEngineTorqueRatio = m_VehicleParams.axles[ i ].torqueFactor;
 
 		pController->mDifferentials.push_back( differential );
