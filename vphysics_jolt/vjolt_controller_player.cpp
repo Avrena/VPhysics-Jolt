@@ -121,16 +121,32 @@ void JoltPhysicsPlayerController::Update( const Vector &position, const Vector &
 
 	m_vCurrentSpeed = velocity;
 	m_pCharacter->Activate();
-	m_bEnable = true;
 
-	if ( velocity.LengthSqr() <= vjolt_player_disable_limit.GetFloat() )
-	{
-		// No input velocity, just go where physics takes you.
-		m_bEnable = false;
-	}
-	else
+	// Source passes CMoveData::m_outWishVel here, which is the velocity applied by this
+	// command, not the player's desired or achieved velocity. It can legitimately be zero
+	// once the player reaches speed. On moveable physics ground Source does not replace that
+	// zero with its usual max-speed fallback, even though the swept position target continues
+	// to advance. Disabling solely from velocity therefore makes the shadow advance only on
+	// acceleration ticks (the visible zero/advance sticking cadence).
+	Vector vObjectPosition;
+	m_pObject->GetPosition( &vObjectPosition, nullptr );
+	const Vector vPositionError = position - vObjectPosition;
+	const float flPositionTolerance = Max( vjolt_player_collision_tolerance.GetFloat(), 1e-3f );
+	const bool bHasVelocityDrive = velocity.LengthSqr() > vjolt_player_disable_limit.GetFloat();
+	const bool bHasPositionDrive = vPositionError.LengthSqr() > flPositionTolerance * flPositionTolerance;
+	m_bEnable = bHasVelocityDrive || bHasPositionDrive;
+
+	if ( bHasVelocityDrive )
 	{
 		MaxSpeed( velocity );
+	}
+	else if ( bHasPositionDrive )
+	{
+		// Source still supplied a future position but no newly-applied velocity. Derive the
+		// correction authority from that already-swept target and its requested arrival time.
+		// This feeds the normal controller/simulation path; it is not a post-step teleport.
+		const float flArrivalTime = Max( m_flSecondsToArrival, 1e-4f );
+		m_vMaxSpeed = Abs( vPositionError / flArrivalTime );
 	}
 
 	// We ignore the given ground here, we use the Jolt player controller's ground.
