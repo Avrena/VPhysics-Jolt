@@ -63,6 +63,15 @@ static ConVar vjolt_velocity_steps( "vjolt_velocity_steps", "10", FCVAR_NONE, "N
 static ConVar vjolt_position_steps( "vjolt_position_steps", "2", FCVAR_NONE, "Number of position steps to perform.", true, 0.0f, true, 64.0f );
 static ConVar vjolt_deterministic( "vjolt_deterministic", "0", FCVAR_NONE, "Whether the simulation is deterministic or not." );
 
+// Jolt's default is 0.02 metres (about 0.787 Source units). That is thicker than
+// many Source props: models/veeds/paper/paper.mdl, for example, has a physics hull
+// only about 0.022 Source units thick. The position solver can therefore consider a
+// paper fully buried below a world brush to be resolved, after which it goes to sleep
+// at a sane coordinate and neither the engine's crazy-origin check nor our NaN/runaway
+// quarantine has a reason to remove it. Keep the tolerance in Source-scale units so a
+// thin hull must retain an exposed, traceable portion above the contact surface.
+static ConVar vjolt_penetration_slop( "vjolt_penetration_slop", "0.01", FCVAR_NONE, "How far bodies may sink into contacts during position solving, in Source units.", true, 0.0f, true, 1.0f );
+
 // Default lowered from Jolt's 0.2: IVP resolves interpenetration far more gently, and
 // multi-body Lua contraptions (e.g. LVS tank suspensions: 10 wheels on ropes+elastics)
 // rely on that. At 0.2 the spawn-time depenetration pop knocks such assemblies into
@@ -868,6 +877,7 @@ void JoltPhysicsEnvironment::Simulate( float deltaTime )
 		settings.mDeterministicSimulation = vjolt_deterministic.GetBool();
 		settings.mLinearCastThreshold = vjolt_linearcast_threshold.GetFloat();
 		settings.mLinearCastMaxPenetration = 0.25f;
+		settings.mPenetrationSlop = SourceToJolt::Distance( vjolt_penetration_slop.GetFloat() );
 		m_PhysicsSystem.SetPhysicsSettings( settings );
 	}
 
