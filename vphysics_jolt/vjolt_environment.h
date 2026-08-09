@@ -207,6 +207,7 @@ public:
 
 	void RegisterConstraint( JoltPhysicsConstraint *pConstraint );
 	void UnregisterConstraint( JoltPhysicsConstraint *pConstraint );
+	void RegisterPreSimConstraint( JoltPhysicsConstraint *pConstraint );
 
 	void AddDirtyStaticBody( const JPH::BodyID &id );
 	void RemoveDirtyStaticBody( const JPH::BodyID &id );
@@ -278,6 +279,7 @@ private:
 
 	// All live (non-deleted) constraints, used by the breakable constraint check.
 	std::vector< JoltPhysicsConstraint * > m_pConstraints;
+	std::vector< JoltPhysicsConstraint * > m_pPreSimConstraints;
 
 	std::vector< IJoltPhysicsController * > m_pPhysicsControllers;
 

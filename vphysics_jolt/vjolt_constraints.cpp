@@ -34,11 +34,15 @@ static ConVar vjolt_constraint_position_substeps( "vjolt_constraint_position_sub
 static ConVar vjolt_ragdoll_min_torque_friction( "vjolt_ragdoll_min_torque_friction", "0.05" );
 
 static ConVar vjolt_onlyrot_recapture_ticks( "vjolt_onlyrot_recapture_ticks", "2", FCVAR_NONE,
-	"Re-zero rotation-only (onlyAngularLimits) constraint frames to the bodies' current relative "
-	"orientation this many simulation steps after creation (0 = keep the creation-time capture). "
+	"Watch this many pre-simulation steps for a delayed relative-orientation change on rotation-only "
+	"(onlyAngularLimits) constraints, then re-zero immediately before the next solve "
+	"(0 = keep the creation-time capture). "
 	"Lua contraptions (LVS/simfphys) teleport wheels and anchors into their intended pose one tick "
 	"AFTER constraining them, so the creation-time frames bake the spawn transient in as permanent "
 	"joint error." );
+
+// Large enough to ignore float noise, but far below LVS's delayed 90-degree wheel alignment.
+static constexpr float ROT_ONLY_RECAPTURE_COS_EPSILON = 0.9999985f; // cos(0.1 degrees)
 
 // Diagnostic knob, default off: hardening mid-settle freezes whatever pose the spawn
 // transient left (live trials: 30 ticks @ 8 Hz made LVS tank tilt WORSE, 6/6 vs 7/12
@@ -529,16 +533,17 @@ void JoltPhysicsConstraint::InitialiseRagdoll( IPhysicsConstraintGroup *pGroup, 
 
 		// The frames above came from Source matrices captured at the Lua call.
 		// LVS/simfphys teleport wheels and steer anchors into their intended
-		// orientation one tick AFTER constraining them (and a 10-wheel tank
-		// stages this over many ticks), so that capture routinely encodes a
-		// mid-transient pose. Schedule a one-shot re-zero of the frames onto
-		// whatever relative orientation the bodies actually hold a few steps
-		// from now.
+		// orientation one tick AFTER constraining them. Keep the settings for a
+		// short observation window so PreSimulate can detect that discrete change
+		// and re-zero before Jolt solves the stale frame. Rebuilding after a fixed
+		// number of solved steps captures suspension motion instead and resets the
+		// constraint's warm-start state while the assembly is already settling.
 		const int nRecaptureTicks = vjolt_onlyrot_recapture_ticks.GetInt();
 		if ( nRecaptureTicks > 0 )
 		{
 			m_pRotOnlySettings = settings;
 			m_nRotOnlyRecaptureTicks = nRecaptureTicks;
+			m_pPhysicsEnvironment->RegisterPreSimConstraint( this );
 		}
 	}
 	else if ( uDOFCount == 0 )
@@ -903,9 +908,14 @@ static float MaxInverseMass( JoltPhysicsObject *pA, JoltPhysicsObject *pB )
 	return Max( invMassOf( pA ), invMassOf( pB ) );
 }
 
-void JoltPhysicsConstraint::PostSimulate()
+bool JoltPhysicsConstraint::PreSimulate()
 {
 	RecaptureRotOnlyFrames();
+	return m_nRotOnlyRecaptureTicks > 0;
+}
+
+void JoltPhysicsConstraint::PostSimulate()
+{
 	HardenLengthSpring();
 	CheckBroken();
 }
@@ -933,24 +943,41 @@ void JoltPhysicsConstraint::RecaptureRotOnlyFrames()
 	if ( m_nRotOnlyRecaptureTicks <= 0 )
 		return;
 
-	if ( --m_nRotOnlyRecaptureTicks > 0 )
+	if ( !m_pRotOnlySettings || !m_pConstraint || !m_pObjReference || !m_pObjAttached )
+	{
+		m_pRotOnlySettings = nullptr;
+		m_nRotOnlyRecaptureTicks = 0;
 		return;
-
-	JPH::Ref< JPH::SixDOFConstraintSettings > settings = std::move( m_pRotOnlySettings );
-
-	if ( !settings || !m_pConstraint || !m_pObjReference || !m_pObjAttached )
-		return;
+	}
 
 	JPH::Body *pRefBody = m_pObjReference->GetBody();
 	JPH::Body *pAttBody = m_pObjAttached->GetBody();
 
-	// Re-express the attached body's constraint frame in reference-body local
-	// space at the orientations the bodies hold RIGHT NOW, so the pose they have
-	// actually settled into (after LVS's constrain-then-teleport init) becomes
-	// the joint's rest pose instead of whatever the mid-transient capture was.
 	const JPH::Quat qRefToAtt = pRefBody->GetRotation().Conjugated() * pAttBody->GetRotation();
-	settings->mAxisX1 = qRefToAtt * settings->mAxisX2;
-	settings->mAxisY1 = qRefToAtt * settings->mAxisY2;
+	const JPH::Vec3 axisX1 = qRefToAtt * m_pRotOnlySettings->mAxisX2;
+	const JPH::Vec3 axisY1 = qRefToAtt * m_pRotOnlySettings->mAxisY2;
+	const bool bFrameChanged =
+		axisX1.Dot( m_pRotOnlySettings->mAxisX1 ) < ROT_ONLY_RECAPTURE_COS_EPSILON ||
+		axisY1.Dot( m_pRotOnlySettings->mAxisY1 ) < ROT_ONLY_RECAPTURE_COS_EPSILON;
+
+	--m_nRotOnlyRecaptureTicks;
+
+	if ( !bFrameChanged )
+	{
+		// No constrain-then-teleport pattern appeared during the observation
+		// window. Preserve the original authored frame and its warm-start state.
+		if ( m_nRotOnlyRecaptureTicks <= 0 )
+			m_pRotOnlySettings = nullptr;
+		return;
+	}
+
+	JPH::Ref< JPH::SixDOFConstraintSettings > settings = std::move( m_pRotOnlySettings );
+	m_nRotOnlyRecaptureTicks = 0;
+
+	// Re-express the attached body's constraint frame in reference-body local
+	// space at the delayed orientations before the solver sees the stale frame.
+	settings->mAxisX1 = axisX1;
+	settings->mAxisY1 = axisY1;
 
 	const bool bEnabled = m_pConstraint->GetEnabled();
 	m_pPhysicsSystem->RemoveConstraint( m_pConstraint );

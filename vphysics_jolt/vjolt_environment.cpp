@@ -900,6 +900,22 @@ void JoltPhysicsEnvironment::Simulate( float deltaTime )
 	for ( IJoltPhysicsController *pController : m_pPhysicsControllers )
 		pController->OnPreSimulate( deltaTime );
 
+	// Rotation-only constraints used by LVS/simfphys can be created before Lua's
+	// deferred wheel/anchor alignment. Re-zero an observed discrete frame change
+	// here so Jolt never solves the stale creation-time frame. The pending list is
+	// normally empty and each member expires after at most two simulation steps.
+	for ( size_t i = 0; i < m_pPreSimConstraints.size(); )
+	{
+		if ( m_pPreSimConstraints[i]->PreSimulate() )
+		{
+			++i;
+			continue;
+		}
+
+		m_pPreSimConstraints[i] = m_pPreSimConstraints.back();
+		m_pPreSimConstraints.pop_back();
+	}
+
 	const int nCollisionSubSteps = vjolt_substeps.GetInt();
 
 	// If we haven't already, optimize the broadphase, currently this can only happen once per-environment
@@ -1735,9 +1751,15 @@ void JoltPhysicsEnvironment::RegisterConstraint( JoltPhysicsConstraint *pConstra
 	m_pConstraints.push_back( pConstraint );
 }
 
+void JoltPhysicsEnvironment::RegisterPreSimConstraint( JoltPhysicsConstraint *pConstraint )
+{
+	m_pPreSimConstraints.push_back( pConstraint );
+}
+
 void JoltPhysicsEnvironment::UnregisterConstraint( JoltPhysicsConstraint *pConstraint )
 {
 	Erase( m_pConstraints, pConstraint );
+	Erase( m_pPreSimConstraints, pConstraint );
 }
 
 //-------------------------------------------------------------------------------------------------

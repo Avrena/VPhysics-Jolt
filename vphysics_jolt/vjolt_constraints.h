@@ -83,7 +83,9 @@ public:
 
 	void SaveConstraintSettings( JPH::StateRecorder &recorder );
 
-	// Once per environment simulate step, after the Jolt update.
+	// Once per environment simulate step, around the Jolt update.
+	// Returns true while this constraint still needs a pre-simulation callback.
+	bool PreSimulate();
 	void PostSimulate();
 
 	bool CheckBroken();
@@ -105,7 +107,8 @@ private:
 	constraintType_t			m_ConstraintType = CONSTRAINT_UNKNOWN;
 
 	// Rotation-only (onlyAngularLimits) ragdoll joints: settings kept alive for a
-	// one-shot frame re-capture N steps after creation (see vjolt_onlyrot_recapture_ticks).
+	// short pre-simulation window that observes delayed body orientation changes
+	// (see vjolt_onlyrot_recapture_ticks).
 	JPH::Ref< JPH::SixDOFConstraintSettings >	m_pRotOnlySettings;
 	int							m_nRotOnlyRecaptureTicks = 0;
 
