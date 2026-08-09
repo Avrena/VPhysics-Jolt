@@ -41,13 +41,27 @@ static ConVar vjolt_onlyrot_recapture_ticks( "vjolt_onlyrot_recapture_ticks", "2
 	"AFTER constraining them, so the creation-time frames bake the spawn transient in as permanent "
 	"joint error." );
 
+static ConVar vjolt_onlyrot_suppress_inverted_mirror( "vjolt_onlyrot_suppress_inverted_mirror", "0", FCVAR_NONE,
+	"Creation-time diagnostic compatibility switch: disable a rotation-only SixDOF with a normal "
+	"free X axis and inverted, near-zero-centered tight Y/Z axes. LVS creates this exact signature "
+	"as the mirrored twin of each wheel spin socket. Existing constraints are unchanged. The Source "
+	"wrapper and its distinct Jolt object stay alive, but suppression identity is not restored across "
+	"an engine save/restore." );
+
+static int g_nOnlyRotSuppressedMirrors = 0;
+
+static ConCommand vjolt_onlyrot_suppression_status( "vjolt_onlyrot_suppression_status", []()
+{
+	Msg( "vjolt_onlyrot_suppressed_live = %d\n", g_nOnlyRotSuppressedMirrors );
+});
+
 // Large enough to ignore float noise, but far below LVS's delayed 90-degree wheel alignment.
 static constexpr float ROT_ONLY_RECAPTURE_COS_EPSILON = 0.9999985f; // cos(0.1 degrees)
 
 // Diagnostic knob, default off: hardening mid-settle freezes whatever pose the spawn
 // transient left (live trials: 30 ticks @ 8 Hz made LVS tank tilt WORSE, 6/6 vs 7/12
-// baseline). The actual fix for transient-captured contraptions is the gentler
-// vjolt_baumgarte_factor default; see vjolt_environment.cpp.
+// baseline). Lower Baumgarte mitigates the same spawn transient without adding
+// steady-state work; it does not eliminate every vehicle equilibrium failure.
 static ConVar vjolt_length_spring_warmup_ticks( "vjolt_length_spring_warmup_ticks", "0", FCVAR_NONE,
 	"Give length (rope) constraints soft spring limits for this many simulation steps after "
 	"creation, then harden to rigid. 0 disables the warmup (default)." );
@@ -163,7 +177,7 @@ JoltPhysicsConstraint::~JoltPhysicsConstraint()
 void JoltPhysicsConstraint::Activate()
 {
 	if ( m_pConstraint )
-		m_pConstraint->SetEnabled( true );
+		m_pConstraint->SetEnabled( !m_bOnlyRotMirrorSuppressed );
 }
 
 void JoltPhysicsConstraint::Deactivate()
@@ -529,6 +543,27 @@ void JoltPhysicsConstraint::InitialiseRagdoll( IPhysicsConstraintGroup *pGroup, 
 			}
 		}
 
+		auto normalizedRange = []( const RagdollLimits_t::Limit_t &axis )
+		{
+			return fabsf( axis.Max - axis.Min );
+		};
+		auto isInvertedTightNearZero = [normalizedRange]( const RagdollLimits_t::Limit_t &axis )
+		{
+			return axis.Min > axis.Max &&
+				normalizedRange( axis ) <= DEG2RAD( 1.0f ) &&
+				fabsf( 0.5f * ( axis.Min + axis.Max ) ) <= DEG2RAD( 0.01f );
+		};
+
+		const RagdollLimits_t::Limit_t &axisX = limits.lAxisLimitsRad[0];
+		m_bOnlyRotMirrorSuppressed =
+			vjolt_onlyrot_suppress_inverted_mirror.GetBool() &&
+			axisX.Min <= axisX.Max &&
+			normalizedRange( axisX ) >= DEG2RAD( 359.0f ) &&
+			isInvertedTightNearZero( limits.lAxisLimitsRad[1] ) &&
+			isInvertedTightNearZero( limits.lAxisLimitsRad[2] );
+		if ( m_bOnlyRotMirrorSuppressed )
+			++g_nOnlyRotSuppressedMirrors;
+
 		pConstraint = settings->Create( *pRefBody, *pAttBody );
 
 		// The frames above came from Source matrices captured at the Lua call.
@@ -539,7 +574,7 @@ void JoltPhysicsConstraint::InitialiseRagdoll( IPhysicsConstraintGroup *pGroup, 
 		// number of solved steps captures suspension motion instead and resets the
 		// constraint's warm-start state while the assembly is already settling.
 		const int nRecaptureTicks = vjolt_onlyrot_recapture_ticks.GetInt();
-		if ( nRecaptureTicks > 0 )
+		if ( nRecaptureTicks > 0 && !m_bOnlyRotMirrorSuppressed )
 		{
 			m_pRotOnlySettings = settings;
 			m_nRotOnlyRecaptureTicks = nRecaptureTicks;
@@ -597,7 +632,7 @@ void JoltPhysicsConstraint::InitialiseRagdoll( IPhysicsConstraintGroup *pGroup, 
 	const bool bActive = !m_pGroup && ragdoll.constraint.isActive;
 
 	m_pConstraint = pConstraint;
-	m_pConstraint->SetEnabled( bActive );
+	m_pConstraint->SetEnabled( bActive && !m_bOnlyRotMirrorSuppressed );
 	m_pPhysicsSystem->AddConstraint( m_pConstraint );
 }
 
@@ -1054,6 +1089,13 @@ void JoltPhysicsConstraint::SetGroup( IPhysicsConstraintGroup *pGroup )
 
 void JoltPhysicsConstraint::DestroyConstraint()
 {
+	if ( m_bOnlyRotMirrorSuppressed )
+	{
+		Assert( g_nOnlyRotSuppressedMirrors > 0 );
+		g_nOnlyRotSuppressedMirrors = Max( 0, g_nOnlyRotSuppressedMirrors - 1 );
+		m_bOnlyRotMirrorSuppressed = false;
+	}
+
 	if ( m_pObjAttached )
 	{
 		m_pObjAttached->RemoveDestroyedListener( this );

@@ -111,6 +111,7 @@ private:
 	// (see vjolt_onlyrot_recapture_ticks).
 	JPH::Ref< JPH::SixDOFConstraintSettings >	m_pRotOnlySettings;
 	int							m_nRotOnlyRecaptureTicks = 0;
+	bool						m_bOnlyRotMirrorSuppressed = false;
 
 	// Length (rope) constraints: countdown until the soft warmup limits harden
 	// (see vjolt_length_spring_warmup_ticks).
