@@ -7,6 +7,8 @@
 #include "cbase.h"
 
 #include <array>
+#include <cerrno>
+#include <cstdlib>
 #include <optional>
 
 #include "vjolt_environment.h"
@@ -165,6 +167,8 @@ struct OnlyRotTraceUpdate
 	std::array< OnlyRotTraceBodyState, 2 > postBodies{};
 	OnlyRotTraceConstraintState preConstraint;
 	OnlyRotTraceConstraintState postConstraint;
+	OnlyRotTraceVec3 vPreviousLambdaPosition;
+	OnlyRotTraceVec3 vPreviousLambdaRotation;
 	OnlyRotTraceVec3 vLambdaPosition;
 	OnlyRotTraceVec3 vLambdaRotation;
 };
@@ -195,9 +199,12 @@ struct OnlyRotTraceRecord
 	uint32 nGeneration = 0;
 	uint32 nTraceID = 0;
 	uint32 nCreationContactTick = 0;
+	uint32 nStartContactTick = 0;
+	uint32 nHeldPreSimCalls = 0;
 	uint8 nCompletion = ONLYROT_TRACE_PENDING;
 	uint8 nPreUpdates = 0;
 	uint8 nPostUpdates = 0;
+	uint8 bExplicitStart = 0;
 	uint8 bAnyTickDiscontinuity = 0;
 	uint8 bHasGroup = 0;
 	uint8 bSourceActive = 0;
@@ -224,8 +231,11 @@ struct OnlyRotTraceRecord
 struct OnlyRotTraceLive
 {
 	OnlyRotTraceRecord record;
+	uint32 nHoldSerial = 0;
 	uint8 nPreUpdates = 0;
 	uint8 nPostUpdates = 0;
+	uint8 bWaitingForStart = 0;
+	uint8 bStarted = 0;
 };
 
 static std::array< OnlyRotTraceRecord, ONLYROT_TRACE_MAX_RECORDS > g_OnlyRotTraceCompleted{};
@@ -233,15 +243,37 @@ static uint32 g_nOnlyRotTraceCompleted = 0;
 static uint32 g_nOnlyRotTraceDropped = 0;
 static uint32 g_nOnlyRotTracePending = 0;
 static uint32 g_nOnlyRotTraceLive = 0;
+static uint32 g_nOnlyRotTraceHeldPending = 0;
+static uint32 g_nOnlyRotTraceHeldLive = 0;
 static uint32 g_nOnlyRotTraceArmBudget = 0;
 static uint32 g_nOnlyRotTraceGeneration = 1;
 static uint32 g_nOnlyRotTraceNextID = 1;
+static uint32 g_nOnlyRotTraceStartSerial = 1;
+static bool g_bOnlyRotTraceArmHeld = false;
+
+static void ReleaseOnlyRotTraceHold( OnlyRotTraceLive &trace )
+{
+	if ( !trace.bWaitingForStart )
+		return;
+
+	Assert( g_nOnlyRotTraceHeldLive > 0 );
+	if ( g_nOnlyRotTraceHeldLive > 0 )
+		--g_nOnlyRotTraceHeldLive;
+	if ( trace.record.nGeneration == g_nOnlyRotTraceGeneration )
+	{
+		Assert( g_nOnlyRotTraceHeldPending > 0 );
+		if ( g_nOnlyRotTraceHeldPending > 0 )
+			--g_nOnlyRotTraceHeldPending;
+	}
+	trace.bWaitingForStart = 0;
+}
 
 static void ReleaseOnlyRotTraceLive( std::unique_ptr< OnlyRotTraceLive > &pTrace )
 {
 	if ( !pTrace )
 		return;
 
+	ReleaseOnlyRotTraceHold( *pTrace );
 	Assert( g_nOnlyRotTraceLive > 0 );
 	if ( g_nOnlyRotTraceLive > 0 )
 		--g_nOnlyRotTraceLive;
@@ -414,9 +446,10 @@ static void DumpOnlyRotConstraintState( uint32 nTraceID, uint32 nUpdate, const c
 
 static void DumpOnlyRotRecord( const OnlyRotTraceRecord &record )
 {
-	Msg( "vjolt_onlyrot_trace id=%u generation=%u completion=%s pre=%u post=%u create_tick=%u tick_discontinuity=%u group=%u source_active=%u clockwise=%u dof_mask=0x%02x free_mask=0x%02x fixed_mask=0x%02x\n",
+	Msg( "vjolt_onlyrot_trace id=%u generation=%u completion=%s pre=%u post=%u create_tick=%u start_tick=%u explicit_start=%u held_presim=%u tick_discontinuity=%u group=%u source_active=%u clockwise=%u dof_mask=0x%02x free_mask=0x%02x fixed_mask=0x%02x\n",
 		record.nTraceID, record.nGeneration, OnlyRotTraceCompletionName( record.nCompletion ), record.nPreUpdates,
-		record.nPostUpdates, record.nCreationContactTick, record.bAnyTickDiscontinuity, record.bHasGroup,
+		record.nPostUpdates, record.nCreationContactTick, record.nStartContactTick, record.bExplicitStart,
+		record.nHeldPreSimCalls, record.bAnyTickDiscontinuity, record.bHasGroup,
 		record.bSourceActive, record.bUseClockwiseRotations, record.nDegreesOfFreedomMask,
 		record.nFreeAxisMask, record.nFixedAxisMask );
 	Msg( "vjolt_onlyrot_trace id=%u creation limits_rad=((%.6g %.6g) (%.6g %.6g) (%.6g %.6g)) rotation_friction=(%.6g %.6g %.6g) "
@@ -447,9 +480,12 @@ static void DumpOnlyRotRecord( const OnlyRotTraceRecord &record )
 				: nullptr;
 
 		Msg( "vjolt_onlyrot_trace id=%u update=%u pre_tick=%u post_tick=%u pre_captured=%u post_captured=%u tick_discontinuity=%u contact_sampled=%u "
+			"previous_lambda_position_jolt=(%.6g %.6g %.6g) previous_lambda_rotation_jolt=(%.6g %.6g %.6g) "
 			"lambda_position_jolt=(%.6g %.6g %.6g) lambda_rotation_jolt=(%.6g %.6g %.6g)\n",
 			record.nTraceID, nUpdate + 1, update.nPreContactTick, update.nPostContactTick,
 			update.bPreCaptured, update.bPostCaptured, update.bTickDiscontinuity, pContactSample != nullptr,
+			update.vPreviousLambdaPosition.x, update.vPreviousLambdaPosition.y, update.vPreviousLambdaPosition.z,
+			update.vPreviousLambdaRotation.x, update.vPreviousLambdaRotation.y, update.vPreviousLambdaRotation.z,
 			update.vLambdaPosition.x, update.vLambdaPosition.y, update.vLambdaPosition.z,
 			update.vLambdaRotation.x, update.vLambdaRotation.y, update.vLambdaRotation.z );
 
@@ -507,11 +543,26 @@ static void DumpOnlyRotRecord( const OnlyRotTraceRecord &record )
 
 static void PrintOnlyRotTraceStatus()
 {
-	Msg( "vjolt_onlyrot_trace_status generation=%u armed=%u pending=%u live=%u completed=%u dropped=%u capacity=%u updates=%u "
+	Msg( "vjolt_onlyrot_trace_status generation=%u armed=%u arm_mode=%s pending=%u live=%u held_pending=%u held_live=%u start_serial=%u completed=%u dropped=%u capacity=%u updates=%u "
 		"contact_updates=3,4,5,8 contacts_per_endpoint=%u record_bytes=%u\n",
-		g_nOnlyRotTraceGeneration, g_nOnlyRotTraceArmBudget, g_nOnlyRotTracePending, g_nOnlyRotTraceLive,
+		g_nOnlyRotTraceGeneration, g_nOnlyRotTraceArmBudget, g_bOnlyRotTraceArmHeld ? "held" : "immediate",
+		g_nOnlyRotTracePending, g_nOnlyRotTraceLive, g_nOnlyRotTraceHeldPending, g_nOnlyRotTraceHeldLive,
+		g_nOnlyRotTraceStartSerial,
 		g_nOnlyRotTraceCompleted, g_nOnlyRotTraceDropped, ONLYROT_TRACE_MAX_RECORDS, ONLYROT_TRACE_UPDATE_COUNT,
 		ONLYROT_TRACE_MAX_CONTACTS, static_cast< uint32 >( sizeof( OnlyRotTraceRecord ) ) );
+}
+
+static bool ParseOnlyRotTraceArmCount( const char *pszValue, uint32 &nOut )
+{
+	errno = 0;
+	char *pEnd = nullptr;
+	const long nValue = std::strtol( pszValue, &pEnd, 10 );
+	if ( errno == ERANGE || pEnd == pszValue || *pEnd != '\0'
+		|| nValue < 0 || nValue > static_cast< long >( ONLYROT_TRACE_MAX_RECORDS ) )
+		return false;
+
+	nOut = static_cast< uint32 >( nValue );
+	return true;
 }
 
 CON_COMMAND( vjolt_onlyrot_trace_next, "Arm bounded first-eight-update diagnostics (contact detail at updates 3,4,5,8) for the next N rotation-only constraints (0-64)." )
@@ -523,10 +574,70 @@ CON_COMMAND( vjolt_onlyrot_trace_next, "Arm bounded first-eight-update diagnosti
 		return;
 	}
 
-	const int nRequested = atoi( args.Arg( 1 ) );
+	uint32 nRequested = 0;
+	if ( !ParseOnlyRotTraceArmCount( args.Arg( 1 ), nRequested ) )
+	{
+		Msg( "vjolt_onlyrot_trace_next rejected: count must be an integer from 0 through %u\n", ONLYROT_TRACE_MAX_RECORDS );
+		PrintOnlyRotTraceStatus();
+		return;
+	}
 	const uint32 nReserved = Min( ONLYROT_TRACE_MAX_RECORDS, g_nOnlyRotTraceLive + g_nOnlyRotTraceCompleted );
 	const uint32 nAvailable = ONLYROT_TRACE_MAX_RECORDS - nReserved;
-	g_nOnlyRotTraceArmBudget = static_cast< uint32 >( Clamp( nRequested, 0, static_cast< int >( nAvailable ) ) );
+	g_nOnlyRotTraceArmBudget = Min( nRequested, nAvailable );
+	g_bOnlyRotTraceArmHeld = false;
+	PrintOnlyRotTraceStatus();
+}
+
+CON_COMMAND( vjolt_onlyrot_trace_hold_next, "Attach bounded diagnostics to the next N rotation-only constraints, but wait for vjolt_onlyrot_trace_start before sampling." )
+{
+	if ( args.ArgC() != 2 )
+	{
+		Msg( "usage: vjolt_onlyrot_trace_hold_next <0-%u>\n", ONLYROT_TRACE_MAX_RECORDS );
+		PrintOnlyRotTraceStatus();
+		return;
+	}
+
+	uint32 nRequested = 0;
+	if ( !ParseOnlyRotTraceArmCount( args.Arg( 1 ), nRequested ) )
+	{
+		Msg( "vjolt_onlyrot_trace_hold_next rejected: count must be an integer from 0 through %u\n", ONLYROT_TRACE_MAX_RECORDS );
+		PrintOnlyRotTraceStatus();
+		return;
+	}
+	const uint32 nReserved = Min( ONLYROT_TRACE_MAX_RECORDS, g_nOnlyRotTraceLive + g_nOnlyRotTraceCompleted );
+	const uint32 nAvailable = ONLYROT_TRACE_MAX_RECORDS - nReserved;
+	g_nOnlyRotTraceArmBudget = Min( nRequested, nAvailable );
+	g_bOnlyRotTraceArmHeld = g_nOnlyRotTraceArmBudget > 0;
+	PrintOnlyRotTraceStatus();
+}
+
+CON_COMMAND( vjolt_onlyrot_trace_start, "Release all current-generation held rotation-only traces together; sampling begins at the next physics update." )
+{
+	if ( args.ArgC() != 1 )
+	{
+		Msg( "usage: vjolt_onlyrot_trace_start\n" );
+		PrintOnlyRotTraceStatus();
+		return;
+	}
+	if ( g_nOnlyRotTraceArmBudget != 0 )
+	{
+		Msg( "vjolt_onlyrot_trace_start rejected: armed=%u constraints have not attached yet\n", g_nOnlyRotTraceArmBudget );
+		PrintOnlyRotTraceStatus();
+		return;
+	}
+	if ( g_nOnlyRotTraceHeldPending == 0 || g_nOnlyRotTraceHeldPending != g_nOnlyRotTracePending )
+	{
+		Msg( "vjolt_onlyrot_trace_start rejected: held_pending=%u pending=%u\n",
+			g_nOnlyRotTraceHeldPending, g_nOnlyRotTracePending );
+		PrintOnlyRotTraceStatus();
+		return;
+	}
+
+	if ( ++g_nOnlyRotTraceStartSerial == 0 )
+		++g_nOnlyRotTraceStartSerial;
+	g_bOnlyRotTraceArmHeld = false;
+	Msg( "vjolt_onlyrot_trace_start release_issued=1 generation=%u held=%u start_serial=%u\n",
+		g_nOnlyRotTraceGeneration, g_nOnlyRotTraceHeldPending, g_nOnlyRotTraceStartSerial );
 	PrintOnlyRotTraceStatus();
 }
 
@@ -562,7 +673,9 @@ CON_COMMAND( vjolt_onlyrot_trace_dump, "Dump one completed bounded rotation-only
 CON_COMMAND( vjolt_onlyrot_trace_clear, "Disarm and clear rotation-only trace diagnostics; in-flight older-generation traces self-discard." )
 {
 	g_nOnlyRotTraceArmBudget = 0;
+	g_bOnlyRotTraceArmHeld = false;
 	g_nOnlyRotTracePending = 0;
+	g_nOnlyRotTraceHeldPending = 0;
 	g_nOnlyRotTraceCompleted = 0;
 	g_nOnlyRotTraceDropped = 0;
 	if ( ++g_nOnlyRotTraceGeneration == 0 )
@@ -1119,6 +1232,14 @@ void JoltPhysicsConstraint::InitialiseRagdoll( IPhysicsConstraintGroup *pGroup, 
 		if ( g_nOnlyRotTraceNextID == 0 )
 			g_nOnlyRotTraceNextID = 1;
 		record.nCreationContactTick = m_pPhysicsEnvironment->GetContactDataTick();
+		if ( g_bOnlyRotTraceArmHeld )
+		{
+			record.bExplicitStart = 1;
+			m_pOnlyRotTrace->nHoldSerial = g_nOnlyRotTraceStartSerial;
+			m_pOnlyRotTrace->bWaitingForStart = 1;
+			++g_nOnlyRotTraceHeldPending;
+			++g_nOnlyRotTraceHeldLive;
+		}
 		record.bHasGroup = m_pGroup != nullptr;
 		record.bSourceActive = ragdoll.constraint.isActive;
 		record.bUseClockwiseRotations = ragdoll.useClockwiseRotations;
@@ -1507,6 +1628,21 @@ bool JoltPhysicsConstraint::TraceOnlyRotPreSimulate()
 		FinishOnlyRotTrace( ONLYROT_TRACE_DESTROYED );
 		return false;
 	}
+	if ( m_pOnlyRotTrace->bWaitingForStart )
+	{
+		if ( m_pOnlyRotTrace->nHoldSerial == g_nOnlyRotTraceStartSerial )
+		{
+			++m_pOnlyRotTrace->record.nHeldPreSimCalls;
+			return true;
+		}
+
+		ReleaseOnlyRotTraceHold( *m_pOnlyRotTrace );
+	}
+	if ( !m_pOnlyRotTrace->bStarted )
+	{
+		m_pOnlyRotTrace->record.nStartContactTick = m_pPhysicsEnvironment->GetContactDataTick();
+		m_pOnlyRotTrace->bStarted = 1;
+	}
 
 	if ( m_pOnlyRotTrace->nPreUpdates >= ONLYROT_TRACE_UPDATE_COUNT )
 		return false;
@@ -1517,6 +1653,12 @@ bool JoltPhysicsConstraint::TraceOnlyRotPreSimulate()
 	update.preBodies[0] = CaptureOnlyRotBodyState( m_pObjReference );
 	update.preBodies[1] = CaptureOnlyRotBodyState( m_pObjAttached );
 	update.preConstraint = CaptureOnlyRotConstraintState( m_pConstraint );
+	if ( m_pConstraint->GetSubType() == JPH::EConstraintSubType::SixDOF )
+	{
+		const JPH::SixDOFConstraint *pSixDOF = static_cast< const JPH::SixDOFConstraint * >( m_pConstraint.GetPtr() );
+		update.vPreviousLambdaPosition = OnlyRotTraceUnitless( pSixDOF->GetTotalLambdaPosition() );
+		update.vPreviousLambdaRotation = OnlyRotTraceUnitless( pSixDOF->GetTotalLambdaRotation() );
+	}
 	++m_pOnlyRotTrace->nPreUpdates;
 	return m_pOnlyRotTrace->nPreUpdates < ONLYROT_TRACE_UPDATE_COUNT;
 }
@@ -1525,6 +1667,8 @@ void JoltPhysicsConstraint::TraceOnlyRotPostBegin()
 {
 	DiscardStaleOnlyRotTrace();
 	if ( !m_pOnlyRotTrace )
+		return;
+	if ( m_pOnlyRotTrace->bWaitingForStart )
 		return;
 
 	if ( !m_pConstraint || !m_pObjReference || !m_pObjAttached )
@@ -1571,7 +1715,8 @@ void JoltPhysicsConstraint::TraceOnlyRotPostBegin()
 
 void JoltPhysicsConstraint::TraceOnlyRotPostEnd()
 {
-	if ( m_pOnlyRotTrace && m_pOnlyRotTrace->nPostUpdates >= ONLYROT_TRACE_UPDATE_COUNT )
+	if ( m_pOnlyRotTrace && !m_pOnlyRotTrace->bWaitingForStart
+		&& m_pOnlyRotTrace->nPostUpdates >= ONLYROT_TRACE_UPDATE_COUNT )
 		FinishOnlyRotTrace( ONLYROT_TRACE_COMPLETE );
 }
 
