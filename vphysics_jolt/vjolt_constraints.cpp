@@ -7,6 +7,7 @@
 #include "cbase.h"
 
 #include <array>
+#include <cmath>
 #include <cerrno>
 #include <cstdlib>
 #include <optional>
@@ -42,6 +43,14 @@ static ConVar vjolt_onlyrot_recapture_ticks( "vjolt_onlyrot_recapture_ticks", "2
 	"Lua contraptions (LVS/simfphys) teleport wheels and anchors into their intended pose one tick "
 	"AFTER constraining them, so the creation-time frames bake the spawn transient in as permanent "
 	"joint error." );
+
+static ConVar vjolt_onlyrot_tiny_axis_motor_frequency( "vjolt_onlyrot_tiny_axis_motor_frequency", "0", FCVAR_NONE,
+	"Position-motor frequency (Hz) for canonical dynamic-to-static rotation-only Y/Z axes whose "
+	"authored window is <= 1 degree. Applied only after the normal frame recapture; 0 disables it.",
+	true, 0.0f, true, 10.0f );
+static ConVar vjolt_onlyrot_tiny_axis_motor_damping( "vjolt_onlyrot_tiny_axis_motor_damping", "1", FCVAR_NONE,
+	"Damping ratio for the default-off tiny-axis rotation-only position motor.",
+	true, 0.0f, true, 4.0f );
 
 // Diagnostic knob, default off: hardening mid-settle freezes whatever pose the spawn
 // transient left (live trials: 30 ticks @ 8 Hz made LVS tank tilt WORSE, 6/6 vs 7/12
@@ -137,6 +146,7 @@ struct OnlyRotTraceConstraintState
 	uint8 bEnabled = 0;
 	uint8 bActive = 0;
 	uint8 nSubType = 0;
+	uint8 nRotationPositionMotorMask = 0;
 	OnlyRotTraceQuat qRotationConstraintSpace;
 };
 
@@ -169,8 +179,10 @@ struct OnlyRotTraceUpdate
 	OnlyRotTraceConstraintState postConstraint;
 	OnlyRotTraceVec3 vPreviousLambdaPosition;
 	OnlyRotTraceVec3 vPreviousLambdaRotation;
+	OnlyRotTraceVec3 vPreviousLambdaMotorRotation;
 	OnlyRotTraceVec3 vLambdaPosition;
 	OnlyRotTraceVec3 vLambdaRotation;
+	OnlyRotTraceVec3 vLambdaMotorRotation;
 };
 
 struct OnlyRotTraceContactSample
@@ -187,6 +199,10 @@ struct OnlyRotTraceRecapture
 	int nLastCountdownBefore = 0;
 	uint8 bRebuilt = 0;
 	uint8 bOldEnabled = 0;
+	uint8 bMotorCanonical = 0;
+	uint8 nMotorRotationAxisMask = 0;
+	float flMotorFrequency = 0.0f;
+	float flMotorDamping = 0.0f;
 	OnlyRotTraceQuat qReferenceToAttached;
 	OnlyRotTraceVec3 vOldAxisX1;
 	OnlyRotTraceVec3 vOldAxisY1;
@@ -361,6 +377,13 @@ static OnlyRotTraceConstraintState CaptureOnlyRotConstraintState( JPH::Constrain
 	{
 		const JPH::SixDOFConstraint *pSixDOF = static_cast< const JPH::SixDOFConstraint * >( pConstraint );
 		out.qRotationConstraintSpace = OnlyRotTraceQuaternion( pSixDOF->GetRotationInConstraintSpace() );
+		for ( int i = 0; i < 3; ++i )
+		{
+			const JPH::SixDOFConstraint::EAxis eAxis = static_cast< JPH::SixDOFConstraint::EAxis >(
+				JPH::SixDOFConstraint::EAxis::RotationX + i );
+			if ( JPH::IsPositionMotor( pSixDOF->GetMotorState( eAxis ) ) )
+				out.nRotationPositionMotorMask |= 1u << i;
+		}
 	}
 	return out;
 }
@@ -438,8 +461,9 @@ static void DumpOnlyRotBodyState( uint32 nTraceID, uint32 nUpdate, const char *p
 
 static void DumpOnlyRotConstraintState( uint32 nTraceID, uint32 nUpdate, const char *pszPhase, const OnlyRotTraceConstraintState &constraint )
 {
-	Msg( "vjolt_onlyrot_trace id=%u update=%u phase=%s constraint_valid=%u enabled=%u active=%u subtype=%u rotation_cs_q=(%.6g %.6g %.6g %.6g)\n",
+	Msg( "vjolt_onlyrot_trace id=%u update=%u phase=%s constraint_valid=%u enabled=%u active=%u subtype=%u position_motor_rotation_mask=0x%02x rotation_cs_q=(%.6g %.6g %.6g %.6g)\n",
 		nTraceID, nUpdate, pszPhase, constraint.bValid, constraint.bEnabled, constraint.bActive, constraint.nSubType,
+		constraint.nRotationPositionMotorMask,
 		constraint.qRotationConstraintSpace.x, constraint.qRotationConstraintSpace.y,
 		constraint.qRotationConstraintSpace.z, constraint.qRotationConstraintSpace.w );
 }
@@ -481,13 +505,16 @@ static void DumpOnlyRotRecord( const OnlyRotTraceRecord &record )
 
 		Msg( "vjolt_onlyrot_trace id=%u update=%u pre_tick=%u post_tick=%u pre_captured=%u post_captured=%u tick_discontinuity=%u contact_sampled=%u "
 			"previous_lambda_position_jolt=(%.6g %.6g %.6g) previous_lambda_rotation_jolt=(%.6g %.6g %.6g) "
-			"lambda_position_jolt=(%.6g %.6g %.6g) lambda_rotation_jolt=(%.6g %.6g %.6g)\n",
+			"previous_lambda_motor_rotation_jolt=(%.6g %.6g %.6g) lambda_position_jolt=(%.6g %.6g %.6g) "
+			"lambda_rotation_jolt=(%.6g %.6g %.6g) lambda_motor_rotation_jolt=(%.6g %.6g %.6g)\n",
 			record.nTraceID, nUpdate + 1, update.nPreContactTick, update.nPostContactTick,
 			update.bPreCaptured, update.bPostCaptured, update.bTickDiscontinuity, pContactSample != nullptr,
 			update.vPreviousLambdaPosition.x, update.vPreviousLambdaPosition.y, update.vPreviousLambdaPosition.z,
 			update.vPreviousLambdaRotation.x, update.vPreviousLambdaRotation.y, update.vPreviousLambdaRotation.z,
+			update.vPreviousLambdaMotorRotation.x, update.vPreviousLambdaMotorRotation.y, update.vPreviousLambdaMotorRotation.z,
 			update.vLambdaPosition.x, update.vLambdaPosition.y, update.vLambdaPosition.z,
-			update.vLambdaRotation.x, update.vLambdaRotation.y, update.vLambdaRotation.z );
+			update.vLambdaRotation.x, update.vLambdaRotation.y, update.vLambdaRotation.z,
+			update.vLambdaMotorRotation.x, update.vLambdaMotorRotation.y, update.vLambdaMotorRotation.z );
 
 		if ( update.bPreCaptured )
 		{
@@ -529,10 +556,13 @@ static void DumpOnlyRotRecord( const OnlyRotTraceRecord &record )
 	}
 
 	Msg( "vjolt_onlyrot_trace id=%u recapture_calls=%u last_tick=%u last_countdown_before=%d rebuilt=%u old_enabled=%u "
+		"motor_canonical=%u motor_rotation_mask=0x%02x motor_frequency_hz=%.6g motor_damping=%.6g "
 		"relative_q=(%.6g %.6g %.6g %.6g) old_x1=(%.6g %.6g %.6g) old_y1=(%.6g %.6g %.6g) "
 		"new_x1=(%.6g %.6g %.6g) new_y1=(%.6g %.6g %.6g)\n",
 		record.nTraceID, record.recapture.nCalls, record.recapture.nLastTick, record.recapture.nLastCountdownBefore,
 		record.recapture.bRebuilt, record.recapture.bOldEnabled,
+		record.recapture.bMotorCanonical, record.recapture.nMotorRotationAxisMask,
+		record.recapture.flMotorFrequency, record.recapture.flMotorDamping,
 		record.recapture.qReferenceToAttached.x, record.recapture.qReferenceToAttached.y,
 		record.recapture.qReferenceToAttached.z, record.recapture.qReferenceToAttached.w,
 		record.recapture.vOldAxisX1.x, record.recapture.vOldAxisX1.y, record.recapture.vOldAxisX1.z,
@@ -1133,6 +1163,8 @@ void JoltPhysicsConstraint::InitialiseRagdoll( IPhysicsConstraintGroup *pGroup, 
 					Max( flCenter - flHalfRange, -JPH::JPH_PI ),
 					Min( flCenter + flHalfRange, JPH::JPH_PI ) );
 				settings->mMaxFriction[ eAxis ] = Max( settings->mMaxFriction[ eAxis ], flMinTorqueFriction );
+				if ( i > 0 )
+					m_nRotOnlyTinySwingAxisMask |= 1u << i;
 			}
 			else if ( flRange >= DEG2RAD( 359.0f ) )
 			{
@@ -1658,6 +1690,7 @@ bool JoltPhysicsConstraint::TraceOnlyRotPreSimulate()
 		const JPH::SixDOFConstraint *pSixDOF = static_cast< const JPH::SixDOFConstraint * >( m_pConstraint.GetPtr() );
 		update.vPreviousLambdaPosition = OnlyRotTraceUnitless( pSixDOF->GetTotalLambdaPosition() );
 		update.vPreviousLambdaRotation = OnlyRotTraceUnitless( pSixDOF->GetTotalLambdaRotation() );
+		update.vPreviousLambdaMotorRotation = OnlyRotTraceUnitless( pSixDOF->GetTotalLambdaMotorRotation() );
 	}
 	++m_pOnlyRotTrace->nPreUpdates;
 	return m_pOnlyRotTrace->nPreUpdates < ONLYROT_TRACE_UPDATE_COUNT;
@@ -1708,6 +1741,7 @@ void JoltPhysicsConstraint::TraceOnlyRotPostBegin()
 		const JPH::SixDOFConstraint *pSixDOF = static_cast< const JPH::SixDOFConstraint * >( m_pConstraint.GetPtr() );
 		update.vLambdaPosition = OnlyRotTraceUnitless( pSixDOF->GetTotalLambdaPosition() );
 		update.vLambdaRotation = OnlyRotTraceUnitless( pSixDOF->GetTotalLambdaRotation() );
+		update.vLambdaMotorRotation = OnlyRotTraceUnitless( pSixDOF->GetTotalLambdaMotorRotation() );
 	}
 
 	++m_pOnlyRotTrace->nPostUpdates;
@@ -1797,10 +1831,34 @@ void JoltPhysicsConstraint::RecaptureRotOnlyFrames()
 	}
 	settings->mAxisX1 = qRefToAtt * settings->mAxisX2;
 	settings->mAxisY1 = qRefToAtt * settings->mAxisY2;
+
+	const bool bMotorCanonical = pRefBody->GetMotionType() == JPH::EMotionType::Dynamic
+		&& pAttBody->GetMotionType() == JPH::EMotionType::Static;
+	const float flMotorFrequency = vjolt_onlyrot_tiny_axis_motor_frequency.GetFloat();
+	const float flMotorDamping = vjolt_onlyrot_tiny_axis_motor_damping.GetFloat();
+	uint8 nMotorRotationAxisMask = 0;
+	if ( bMotorCanonical && m_nRotOnlyTinySwingAxisMask != 0
+		&& std::isfinite( flMotorFrequency ) && flMotorFrequency > 0.0f
+		&& std::isfinite( flMotorDamping ) && flMotorDamping >= 0.0f )
+	{
+		nMotorRotationAxisMask = m_nRotOnlyTinySwingAxisMask;
+		for ( int i = 0; i < 3; ++i )
+		{
+			if ( ( nMotorRotationAxisMask & ( 1u << i ) ) == 0 )
+				continue;
+			const JPH::SixDOFConstraintSettings::EAxis eAxis =
+				static_cast< JPH::SixDOFConstraintSettings::EAxis >( JPH::SixDOFConstraintSettings::EAxis::RotationX + i );
+			settings->mMotorSettings[ eAxis ] = JPH::MotorSettings( flMotorFrequency, flMotorDamping );
+		}
+	}
 	if ( pTraceRecapture )
 	{
 		pTraceRecapture->vNewAxisX1 = OnlyRotTraceUnitless( settings->mAxisX1 );
 		pTraceRecapture->vNewAxisY1 = OnlyRotTraceUnitless( settings->mAxisY1 );
+		pTraceRecapture->bMotorCanonical = bMotorCanonical;
+		pTraceRecapture->nMotorRotationAxisMask = nMotorRotationAxisMask;
+		pTraceRecapture->flMotorFrequency = flMotorFrequency;
+		pTraceRecapture->flMotorDamping = flMotorDamping;
 	}
 
 	const bool bEnabled = m_pConstraint->GetEnabled();
@@ -1809,6 +1867,19 @@ void JoltPhysicsConstraint::RecaptureRotOnlyFrames()
 	m_pPhysicsSystem->RemoveConstraint( m_pConstraint );
 	m_pConstraint = settings->Create( *pRefBody, *pAttBody );
 	m_pConstraint->SetEnabled( bEnabled );
+	if ( nMotorRotationAxisMask != 0 )
+	{
+		JPH::SixDOFConstraint *pSixDOF = static_cast< JPH::SixDOFConstraint * >( m_pConstraint.GetPtr() );
+		pSixDOF->SetTargetOrientationCS( JPH::Quat::sIdentity() );
+		for ( int i = 0; i < 3; ++i )
+		{
+			if ( ( nMotorRotationAxisMask & ( 1u << i ) ) == 0 )
+				continue;
+			const JPH::SixDOFConstraint::EAxis eAxis = static_cast< JPH::SixDOFConstraint::EAxis >(
+				JPH::SixDOFConstraint::EAxis::RotationX + i );
+			pSixDOF->SetMotorState( eAxis, JPH::EMotorState::Position );
+		}
+	}
 	m_pPhysicsSystem->AddConstraint( m_pConstraint );
 }
 
@@ -1896,6 +1967,7 @@ void JoltPhysicsConstraint::DestroyConstraint()
 
 	m_pRotOnlySettings = nullptr;
 	m_nRotOnlyRecaptureTicks = 0;
+	m_nRotOnlyTinySwingAxisMask = 0;
 	m_nLengthSpringWarmupTicks = 0;
 
 	if ( m_pConstraint )

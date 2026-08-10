@@ -119,6 +119,7 @@ private:
 	// one-shot frame re-capture N steps after creation (see vjolt_onlyrot_recapture_ticks).
 	JPH::Ref< JPH::SixDOFConstraintSettings >	m_pRotOnlySettings;
 	int							m_nRotOnlyRecaptureTicks = 0;
+	uint8						m_nRotOnlyTinySwingAxisMask = 0;
 	std::unique_ptr< OnlyRotTraceLive >	m_pOnlyRotTrace;
 
 	// Length (rope) constraints: countdown until the soft warmup limits harden
