@@ -70,8 +70,21 @@ static ConVar vjolt_constraint_break_debug( "vjolt_constraint_break_debug", "0",
 // text output is deferred to an operator-issued command after the measured
 // updates have completed.
 static constexpr uint32 ONLYROT_TRACE_MAX_RECORDS = 64;
-static constexpr uint32 ONLYROT_TRACE_MAX_CONTACTS = 8;
-static constexpr uint32 ONLYROT_TRACE_UPDATE_COUNT = 2;
+static constexpr uint32 ONLYROT_TRACE_MAX_CONTACTS = 2;
+static constexpr uint32 ONLYROT_TRACE_UPDATE_COUNT = 8;
+static constexpr uint32 ONLYROT_TRACE_CONTACT_SAMPLE_COUNT = 4;
+
+static int OnlyRotTraceContactSampleForUpdate( uint32 nUpdate )
+{
+	switch ( nUpdate )
+	{
+	case 2: return 0;
+	case 3: return 1;
+	case 4: return 2;
+	case 7: return 3;
+	default: return -1;
+	}
+}
 
 enum OnlyRotTraceCompletion : uint8
 {
@@ -154,7 +167,13 @@ struct OnlyRotTraceUpdate
 	OnlyRotTraceConstraintState postConstraint;
 	OnlyRotTraceVec3 vLambdaPosition;
 	OnlyRotTraceVec3 vLambdaRotation;
-	std::array< OnlyRotTraceContactSummary, 2 > contacts{};
+};
+
+struct OnlyRotTraceContactSample
+{
+	uint8 bCaptured = 0;
+	uint8 nUpdate = 0;
+	std::array< OnlyRotTraceContactSummary, 2 > endpoints{};
 };
 
 struct OnlyRotTraceRecapture
@@ -198,6 +217,7 @@ struct OnlyRotTraceRecord
 	std::array< OnlyRotTraceBodyState, 2 > creationBodies{};
 	OnlyRotTraceConstraintState creationConstraint;
 	std::array< OnlyRotTraceUpdate, ONLYROT_TRACE_UPDATE_COUNT > updates{};
+	std::array< OnlyRotTraceContactSample, ONLYROT_TRACE_CONTACT_SAMPLE_COUNT > contactSamples{};
 	OnlyRotTraceRecapture recapture;
 };
 
@@ -420,11 +440,16 @@ static void DumpOnlyRotRecord( const OnlyRotTraceRecord &record )
 		const OnlyRotTraceUpdate &update = record.updates[nUpdate];
 		if ( !update.bPreCaptured && !update.bPostCaptured )
 			continue;
+		const int nContactSampleIndex = OnlyRotTraceContactSampleForUpdate( nUpdate );
+		const OnlyRotTraceContactSample *pContactSample =
+			nContactSampleIndex >= 0 && record.contactSamples[nContactSampleIndex].bCaptured
+				? &record.contactSamples[nContactSampleIndex]
+				: nullptr;
 
-		Msg( "vjolt_onlyrot_trace id=%u update=%u pre_tick=%u post_tick=%u pre_captured=%u post_captured=%u tick_discontinuity=%u "
+		Msg( "vjolt_onlyrot_trace id=%u update=%u pre_tick=%u post_tick=%u pre_captured=%u post_captured=%u tick_discontinuity=%u contact_sampled=%u "
 			"lambda_position_jolt=(%.6g %.6g %.6g) lambda_rotation_jolt=(%.6g %.6g %.6g)\n",
 			record.nTraceID, nUpdate + 1, update.nPreContactTick, update.nPostContactTick,
-			update.bPreCaptured, update.bPostCaptured, update.bTickDiscontinuity,
+			update.bPreCaptured, update.bPostCaptured, update.bTickDiscontinuity, pContactSample != nullptr,
 			update.vLambdaPosition.x, update.vLambdaPosition.y, update.vLambdaPosition.z,
 			update.vLambdaRotation.x, update.vLambdaRotation.y, update.vLambdaRotation.z );
 
@@ -440,11 +465,13 @@ static void DumpOnlyRotRecord( const OnlyRotTraceRecord &record )
 		DumpOnlyRotBodyState( record.nTraceID, nUpdate + 1, "post", "reference", update.postBodies[0] );
 		DumpOnlyRotBodyState( record.nTraceID, nUpdate + 1, "post", "attached", update.postBodies[1] );
 		DumpOnlyRotConstraintState( record.nTraceID, nUpdate + 1, "post", update.postConstraint );
+		if ( !pContactSample )
+			continue;
 
 		for ( uint32 nEndpoint = 0; nEndpoint < 2; ++nEndpoint )
 		{
 			const char *pszEndpoint = nEndpoint == 0 ? "reference" : "attached";
-			const OnlyRotTraceContactSummary &summary = update.contacts[nEndpoint];
+			const OnlyRotTraceContactSummary &summary = pContactSample->endpoints[nEndpoint];
 			Msg( "vjolt_onlyrot_trace id=%u update=%u endpoint=%s contact_estimate_enabled=%u fresh=%u stored=%u total=%u truncated=%u\n",
 				record.nTraceID, nUpdate + 1, pszEndpoint, summary.bEstimateEnabled, summary.bFresh,
 				summary.nStored, summary.nTotal, summary.nTotal > summary.nStored );
@@ -480,12 +507,14 @@ static void DumpOnlyRotRecord( const OnlyRotTraceRecord &record )
 
 static void PrintOnlyRotTraceStatus()
 {
-	Msg( "vjolt_onlyrot_trace_status generation=%u armed=%u pending=%u live=%u completed=%u dropped=%u capacity=%u contacts_per_endpoint=%u\n",
+	Msg( "vjolt_onlyrot_trace_status generation=%u armed=%u pending=%u live=%u completed=%u dropped=%u capacity=%u updates=%u "
+		"contact_updates=3,4,5,8 contacts_per_endpoint=%u record_bytes=%u\n",
 		g_nOnlyRotTraceGeneration, g_nOnlyRotTraceArmBudget, g_nOnlyRotTracePending, g_nOnlyRotTraceLive,
-		g_nOnlyRotTraceCompleted, g_nOnlyRotTraceDropped, ONLYROT_TRACE_MAX_RECORDS, ONLYROT_TRACE_MAX_CONTACTS );
+		g_nOnlyRotTraceCompleted, g_nOnlyRotTraceDropped, ONLYROT_TRACE_MAX_RECORDS, ONLYROT_TRACE_UPDATE_COUNT,
+		ONLYROT_TRACE_MAX_CONTACTS, static_cast< uint32 >( sizeof( OnlyRotTraceRecord ) ) );
 }
 
-CON_COMMAND( vjolt_onlyrot_trace_next, "Arm bounded first-two-update diagnostics for the next N rotation-only constraints (0-64)." )
+CON_COMMAND( vjolt_onlyrot_trace_next, "Arm bounded first-eight-update diagnostics (contact detail at updates 3,4,5,8) for the next N rotation-only constraints (0-64)." )
 {
 	if ( args.ArgC() != 2 )
 	{
@@ -1507,7 +1536,8 @@ void JoltPhysicsConstraint::TraceOnlyRotPostBegin()
 	if ( m_pOnlyRotTrace->nPostUpdates >= ONLYROT_TRACE_UPDATE_COUNT )
 		return;
 
-	OnlyRotTraceUpdate &update = m_pOnlyRotTrace->record.updates[m_pOnlyRotTrace->nPostUpdates];
+	const uint32 nUpdate = m_pOnlyRotTrace->nPostUpdates;
+	OnlyRotTraceUpdate &update = m_pOnlyRotTrace->record.updates[nUpdate];
 	update.bPostCaptured = 1;
 	update.nPostContactTick = m_pPhysicsEnvironment->GetContactDataTick();
 	if ( !update.bPreCaptured || update.nPostContactTick - update.nPreContactTick != 1 )
@@ -1519,8 +1549,15 @@ void JoltPhysicsConstraint::TraceOnlyRotPostBegin()
 	update.postBodies[0] = CaptureOnlyRotBodyState( m_pObjReference );
 	update.postBodies[1] = CaptureOnlyRotBodyState( m_pObjAttached );
 	update.postConstraint = CaptureOnlyRotConstraintState( m_pConstraint );
-	CaptureOnlyRotContacts( m_pObjReference, update.contacts[0] );
-	CaptureOnlyRotContacts( m_pObjAttached, update.contacts[1] );
+	const int nContactSampleIndex = OnlyRotTraceContactSampleForUpdate( nUpdate );
+	if ( nContactSampleIndex >= 0 )
+	{
+		OnlyRotTraceContactSample &sample = m_pOnlyRotTrace->record.contactSamples[nContactSampleIndex];
+		sample.bCaptured = 1;
+		sample.nUpdate = static_cast< uint8 >( nUpdate + 1 );
+		CaptureOnlyRotContacts( m_pObjReference, sample.endpoints[0] );
+		CaptureOnlyRotContacts( m_pObjAttached, sample.endpoints[1] );
+	}
 
 	if ( m_pConstraint->GetSubType() == JPH::EConstraintSubType::SixDOF )
 	{
@@ -1541,9 +1578,9 @@ void JoltPhysicsConstraint::TraceOnlyRotPostEnd()
 void JoltPhysicsConstraint::PostSimulate()
 {
 	// Keep the normal path to one predictable null branch. For an armed trace,
-	// snapshot lambda/contact state before the legacy c356 recapture can replace
-	// the second-update constraint with a new, not-yet-solved SixDOF; complete
-	// the record only after the rebuild event has been recorded.
+	// Snapshot each update before the legacy c356 recapture can replace the
+	// second-update constraint with a new, not-yet-solved SixDOF. Run post-end
+	// only after any rebuild event has been recorded into the eventual record.
 	if ( m_pOnlyRotTrace )
 	{
 		TraceOnlyRotPostBegin();
