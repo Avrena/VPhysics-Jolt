@@ -900,6 +900,20 @@ void JoltPhysicsEnvironment::Simulate( float deltaTime )
 	for ( IJoltPhysicsController *pController : m_pPhysicsControllers )
 		pController->OnPreSimulate( deltaTime );
 
+	// Default-off first-solve diagnostics. This vector contains only explicitly
+	// armed rotation-only constraints and expires each entry after two updates.
+	for ( size_t i = 0; i < m_pOnlyRotTraceConstraints.size(); )
+	{
+		if ( m_pOnlyRotTraceConstraints[i]->TraceOnlyRotPreSimulate() )
+		{
+			++i;
+			continue;
+		}
+
+		m_pOnlyRotTraceConstraints[i] = m_pOnlyRotTraceConstraints.back();
+		m_pOnlyRotTraceConstraints.pop_back();
+	}
+
 	const int nCollisionSubSteps = vjolt_substeps.GetInt();
 
 	// If we haven't already, optimize the broadphase, currently this can only happen once per-environment
@@ -1735,9 +1749,15 @@ void JoltPhysicsEnvironment::RegisterConstraint( JoltPhysicsConstraint *pConstra
 	m_pConstraints.push_back( pConstraint );
 }
 
+void JoltPhysicsEnvironment::RegisterOnlyRotTraceConstraint( JoltPhysicsConstraint *pConstraint )
+{
+	m_pOnlyRotTraceConstraints.push_back( pConstraint );
+}
+
 void JoltPhysicsEnvironment::UnregisterConstraint( JoltPhysicsConstraint *pConstraint )
 {
 	Erase( m_pConstraints, pConstraint );
+	Erase( m_pOnlyRotTraceConstraints, pConstraint );
 }
 
 //-------------------------------------------------------------------------------------------------

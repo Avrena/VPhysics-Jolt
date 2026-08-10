@@ -1501,6 +1501,30 @@ bool JoltPhysicsObject::GetFreshContactPairs( std::vector< ContactPairData > &ou
 	return true;
 }
 
+bool JoltPhysicsObject::GetFreshContactPairs( ContactPairData *pOut, uint32 nCapacity, uint32 &nOutCount, uint32 &nTotalCount ) const
+{
+	nOutCount = 0;
+	nTotalCount = 0;
+
+	const uint32 nNow = m_pEnvironment->GetContactDataTick();
+	std::lock_guard< std::mutex > lock( m_LastContactImpulsesLock );
+	if ( m_nLastImpulseTick != nNow )
+		return false;
+
+	nTotalCount = static_cast< uint32 >( m_LastContactImpulses.size() );
+	if ( !pOut || nCapacity == 0 )
+		return true;
+
+	for ( const auto &pair : m_LastContactImpulses )
+	{
+		if ( nOutCount >= nCapacity )
+			break;
+
+		pOut[nOutCount++] = ContactPairData{ pair.first, pair.second.vImpulse, pair.second.vContactPoint };
+	}
+	return true;
+}
+
 float JoltPhysicsObject::GetLastContactFrictionEnergy( JoltPhysicsObject *pOther ) const
 {
 	std::lock_guard< std::mutex > lock( m_LastContactImpulsesLock );

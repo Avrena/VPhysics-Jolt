@@ -206,6 +206,7 @@ public:
 	void NotifyConstraintDisabled( JoltPhysicsConstraint* pConstraint );
 
 	void RegisterConstraint( JoltPhysicsConstraint *pConstraint );
+	void RegisterOnlyRotTraceConstraint( JoltPhysicsConstraint *pConstraint );
 	void UnregisterConstraint( JoltPhysicsConstraint *pConstraint );
 
 	void AddDirtyStaticBody( const JPH::BodyID &id );
@@ -278,6 +279,10 @@ private:
 
 	// All live (non-deleted) constraints, used by the breakable constraint check.
 	std::vector< JoltPhysicsConstraint * > m_pConstraints;
+	// Default-empty diagnostic list. Only explicitly armed rotation-only
+	// constraints enter it, so normal simulation never scans all constraints
+	// before the Jolt update.
+	std::vector< JoltPhysicsConstraint * > m_pOnlyRotTraceConstraints;
 
 	std::vector< IJoltPhysicsController * > m_pPhysicsControllers;
 

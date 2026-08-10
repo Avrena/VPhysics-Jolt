@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <memory>
+
 #include "vjolt_internal_listeners.h"
 
 enum constraintType_t
@@ -22,6 +24,7 @@ enum constraintType_t
 
 class JoltPhysicsConstraint;
 class JoltPhysicsEnvironment;
+struct OnlyRotTraceLive;
 
 class JoltPhysicsConstraintGroup final : public IPhysicsConstraintGroup
 {
@@ -83,6 +86,10 @@ public:
 
 	void SaveConstraintSettings( JPH::StateRecorder &recorder );
 
+	// Default-off, armed-only diagnostic callback immediately before an update.
+	// Returns true while another pre-update sample is required.
+	bool TraceOnlyRotPreSimulate();
+
 	// Once per environment simulate step, after the Jolt update.
 	void PostSimulate();
 
@@ -92,6 +99,10 @@ private:
 
 	void RecaptureRotOnlyFrames();
 	void HardenLengthSpring();
+	void TraceOnlyRotPostBegin();
+	void TraceOnlyRotPostEnd();
+	void FinishOnlyRotTrace( uint8 nCompletion );
+	void DiscardStaleOnlyRotTrace();
 
 	void SetGroup( IPhysicsConstraintGroup *pGroup );
 
@@ -108,6 +119,7 @@ private:
 	// one-shot frame re-capture N steps after creation (see vjolt_onlyrot_recapture_ticks).
 	JPH::Ref< JPH::SixDOFConstraintSettings >	m_pRotOnlySettings;
 	int							m_nRotOnlyRecaptureTicks = 0;
+	std::unique_ptr< OnlyRotTraceLive >	m_pOnlyRotTrace;
 
 	// Length (rope) constraints: countdown until the soft warmup limits harden
 	// (see vjolt_length_spring_warmup_ticks).

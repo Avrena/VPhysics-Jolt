@@ -6,6 +6,7 @@
 
 #include "cbase.h"
 
+#include <array>
 #include <optional>
 
 #include "vjolt_environment.h"
@@ -42,8 +43,8 @@ static ConVar vjolt_onlyrot_recapture_ticks( "vjolt_onlyrot_recapture_ticks", "2
 
 // Diagnostic knob, default off: hardening mid-settle freezes whatever pose the spawn
 // transient left (live trials: 30 ticks @ 8 Hz made LVS tank tilt WORSE, 6/6 vs 7/12
-// baseline). The actual fix for transient-captured contraptions is the gentler
-// vjolt_baumgarte_factor default; see vjolt_environment.cpp.
+// baseline). The gentler vjolt_baumgarte_factor was an earlier M3A3 mitigation,
+// not a proven general fix: the later 48-stock-BRDM sample still varied materially.
 static ConVar vjolt_length_spring_warmup_ticks( "vjolt_length_spring_warmup_ticks", "0", FCVAR_NONE,
 	"Give length (rope) constraints soft spring limits for this many simulation steps after "
 	"creation, then harden to rigid. 0 disables the warmup (default)." );
@@ -61,6 +62,484 @@ static constexpr float UNBREAKABLE_BREAK_LIMIT = 1e12f;
 
 static ConVar vjolt_constraint_break_debug( "vjolt_constraint_break_debug", "0", FCVAR_NONE,
 	"Log lambda + threshold values whenever a breakable constraint trips." );
+
+//-------------------------------------------------------------------------------------------------
+
+// Bounded, explicitly armed first-solve diagnostics for rotation-only SixDOF
+// constraints. Physics paths only copy numeric state into these records; all
+// text output is deferred to an operator-issued command after the measured
+// updates have completed.
+static constexpr uint32 ONLYROT_TRACE_MAX_RECORDS = 64;
+static constexpr uint32 ONLYROT_TRACE_MAX_CONTACTS = 8;
+static constexpr uint32 ONLYROT_TRACE_UPDATE_COUNT = 2;
+
+enum OnlyRotTraceCompletion : uint8
+{
+	ONLYROT_TRACE_PENDING = 0,
+	ONLYROT_TRACE_COMPLETE,
+	ONLYROT_TRACE_DESTROYED,
+};
+
+struct OnlyRotTraceVec3
+{
+	float x = 0.0f;
+	float y = 0.0f;
+	float z = 0.0f;
+};
+
+struct OnlyRotTraceQuat
+{
+	float x = 0.0f;
+	float y = 0.0f;
+	float z = 0.0f;
+	float w = 1.0f;
+};
+
+struct OnlyRotTraceBodyIdentity
+{
+	uint8 bValid = 0;
+	uint8 bSourceStatic = 0;
+	uint8 bSourceMotionEnabled = 0;
+	uint8 bJoltActive = 0;
+	uint8 nJoltMotionType = 0;
+	uint16 nObjectLayer = 0;
+	uint32 nBodyID = 0;
+	uintp nGameData = 0;
+};
+
+struct OnlyRotTraceBodyState
+{
+	OnlyRotTraceBodyIdentity identity;
+	OnlyRotTraceVec3 vPositionSource;
+	OnlyRotTraceQuat qRotation;
+	OnlyRotTraceVec3 vLinearVelocitySource;
+	OnlyRotTraceVec3 vAngularVelocityDegrees;
+};
+
+struct OnlyRotTraceConstraintState
+{
+	uint8 bValid = 0;
+	uint8 bEnabled = 0;
+	uint8 bActive = 0;
+	uint8 nSubType = 0;
+	OnlyRotTraceQuat qRotationConstraintSpace;
+};
+
+struct OnlyRotTraceContact
+{
+	OnlyRotTraceBodyIdentity other;
+	OnlyRotTraceVec3 vEstimatedNormalImpulse;
+	OnlyRotTraceVec3 vContactPointSource;
+};
+
+struct OnlyRotTraceContactSummary
+{
+	uint8 bEstimateEnabled = 0;
+	uint8 bFresh = 0;
+	uint32 nStored = 0;
+	uint32 nTotal = 0;
+	std::array< OnlyRotTraceContact, ONLYROT_TRACE_MAX_CONTACTS > contacts{};
+};
+
+struct OnlyRotTraceUpdate
+{
+	uint8 bPreCaptured = 0;
+	uint8 bPostCaptured = 0;
+	uint8 bTickDiscontinuity = 0;
+	uint32 nPreContactTick = 0;
+	uint32 nPostContactTick = 0;
+	std::array< OnlyRotTraceBodyState, 2 > preBodies{};
+	std::array< OnlyRotTraceBodyState, 2 > postBodies{};
+	OnlyRotTraceConstraintState preConstraint;
+	OnlyRotTraceConstraintState postConstraint;
+	OnlyRotTraceVec3 vLambdaPosition;
+	OnlyRotTraceVec3 vLambdaRotation;
+	std::array< OnlyRotTraceContactSummary, 2 > contacts{};
+};
+
+struct OnlyRotTraceRecapture
+{
+	uint32 nCalls = 0;
+	uint32 nLastTick = 0;
+	int nLastCountdownBefore = 0;
+	uint8 bRebuilt = 0;
+	uint8 bOldEnabled = 0;
+	OnlyRotTraceQuat qReferenceToAttached;
+	OnlyRotTraceVec3 vOldAxisX1;
+	OnlyRotTraceVec3 vOldAxisY1;
+	OnlyRotTraceVec3 vNewAxisX1;
+	OnlyRotTraceVec3 vNewAxisY1;
+};
+
+struct OnlyRotTraceRecord
+{
+	uint32 nGeneration = 0;
+	uint32 nTraceID = 0;
+	uint32 nCreationContactTick = 0;
+	uint8 nCompletion = ONLYROT_TRACE_PENDING;
+	uint8 nPreUpdates = 0;
+	uint8 nPostUpdates = 0;
+	uint8 bAnyTickDiscontinuity = 0;
+	uint8 bHasGroup = 0;
+	uint8 bSourceActive = 0;
+	uint8 bUseClockwiseRotations = 0;
+	uint8 nDegreesOfFreedomMask = 0;
+	uint8 nFreeAxisMask = 0;
+	uint8 nFixedAxisMask = 0;
+	std::array< float, 3 > flLimitMinRadians{};
+	std::array< float, 3 > flLimitMaxRadians{};
+	std::array< float, 3 > flRotationMaxFriction{};
+	OnlyRotTraceVec3 vPosition1Source;
+	OnlyRotTraceVec3 vAxisX1;
+	OnlyRotTraceVec3 vAxisY1;
+	OnlyRotTraceVec3 vPosition2Source;
+	OnlyRotTraceVec3 vAxisX2;
+	OnlyRotTraceVec3 vAxisY2;
+	std::array< OnlyRotTraceBodyState, 2 > creationBodies{};
+	OnlyRotTraceConstraintState creationConstraint;
+	std::array< OnlyRotTraceUpdate, ONLYROT_TRACE_UPDATE_COUNT > updates{};
+	OnlyRotTraceRecapture recapture;
+};
+
+struct OnlyRotTraceLive
+{
+	OnlyRotTraceRecord record;
+	uint8 nPreUpdates = 0;
+	uint8 nPostUpdates = 0;
+};
+
+static std::array< OnlyRotTraceRecord, ONLYROT_TRACE_MAX_RECORDS > g_OnlyRotTraceCompleted{};
+static uint32 g_nOnlyRotTraceCompleted = 0;
+static uint32 g_nOnlyRotTraceDropped = 0;
+static uint32 g_nOnlyRotTracePending = 0;
+static uint32 g_nOnlyRotTraceLive = 0;
+static uint32 g_nOnlyRotTraceArmBudget = 0;
+static uint32 g_nOnlyRotTraceGeneration = 1;
+static uint32 g_nOnlyRotTraceNextID = 1;
+
+static void ReleaseOnlyRotTraceLive( std::unique_ptr< OnlyRotTraceLive > &pTrace )
+{
+	if ( !pTrace )
+		return;
+
+	Assert( g_nOnlyRotTraceLive > 0 );
+	if ( g_nOnlyRotTraceLive > 0 )
+		--g_nOnlyRotTraceLive;
+	pTrace.reset();
+}
+
+static OnlyRotTraceVec3 OnlyRotTraceUnitless( JPH::Vec3Arg value )
+{
+	return { value.GetX(), value.GetY(), value.GetZ() };
+}
+
+static OnlyRotTraceVec3 OnlyRotTraceSourceDistance( JPH::Vec3Arg value )
+{
+	return { JoltToSource::Distance( value.GetX() ), JoltToSource::Distance( value.GetY() ), JoltToSource::Distance( value.GetZ() ) };
+}
+
+static OnlyRotTraceVec3 OnlyRotTraceSourcePosition( JPH::RVec3Arg value )
+{
+	return {
+		JoltToSource::Distance( static_cast< float >( value.GetX() ) ),
+		JoltToSource::Distance( static_cast< float >( value.GetY() ) ),
+		JoltToSource::Distance( static_cast< float >( value.GetZ() ) )
+	};
+}
+
+static OnlyRotTraceVec3 OnlyRotTraceSourceVector( const Vector &value )
+{
+	return { value.x, value.y, value.z };
+}
+
+static OnlyRotTraceVec3 OnlyRotTraceDegrees( JPH::Vec3Arg value )
+{
+	return { RAD2DEG( value.GetX() ), RAD2DEG( value.GetY() ), RAD2DEG( value.GetZ() ) };
+}
+
+static OnlyRotTraceQuat OnlyRotTraceQuaternion( JPH::QuatArg value )
+{
+	return { value.GetX(), value.GetY(), value.GetZ(), value.GetW() };
+}
+
+static OnlyRotTraceBodyIdentity CaptureOnlyRotBodyIdentity( JoltPhysicsObject *pObject )
+{
+	OnlyRotTraceBodyIdentity out;
+	if ( !pObject || !pObject->GetBody() )
+		return out;
+
+	JPH::Body *pBody = pObject->GetBody();
+	out.bValid = 1;
+	out.bSourceStatic = pObject->IsStatic();
+	out.bSourceMotionEnabled = pObject->IsMotionEnabled();
+	out.bJoltActive = pBody->IsActive();
+	out.nJoltMotionType = static_cast< uint8 >( pBody->GetMotionType() );
+	out.nObjectLayer = static_cast< uint16 >( pBody->GetObjectLayer() );
+	out.nBodyID = pBody->GetID().GetIndexAndSequenceNumber();
+	out.nGameData = reinterpret_cast< uintp >( pObject->GetGameData() );
+	return out;
+}
+
+static OnlyRotTraceBodyState CaptureOnlyRotBodyState( JoltPhysicsObject *pObject )
+{
+	OnlyRotTraceBodyState out;
+	out.identity = CaptureOnlyRotBodyIdentity( pObject );
+	if ( !out.identity.bValid )
+		return out;
+
+	JPH::Body *pBody = pObject->GetBody();
+	out.vPositionSource = OnlyRotTraceSourcePosition( pBody->GetPosition() );
+	out.qRotation = OnlyRotTraceQuaternion( pBody->GetRotation() );
+	out.vLinearVelocitySource = OnlyRotTraceSourceDistance( pBody->GetLinearVelocity() );
+	out.vAngularVelocityDegrees = OnlyRotTraceDegrees( pBody->GetAngularVelocity() );
+	return out;
+}
+
+static OnlyRotTraceConstraintState CaptureOnlyRotConstraintState( JPH::Constraint *pConstraint )
+{
+	OnlyRotTraceConstraintState out;
+	if ( !pConstraint )
+		return out;
+
+	out.bValid = 1;
+	out.bEnabled = pConstraint->GetEnabled();
+	out.bActive = pConstraint->IsActive();
+	out.nSubType = static_cast< uint8 >( pConstraint->GetSubType() );
+	if ( pConstraint->GetSubType() == JPH::EConstraintSubType::SixDOF )
+	{
+		const JPH::SixDOFConstraint *pSixDOF = static_cast< const JPH::SixDOFConstraint * >( pConstraint );
+		out.qRotationConstraintSpace = OnlyRotTraceQuaternion( pSixDOF->GetRotationInConstraintSpace() );
+	}
+	return out;
+}
+
+static void CaptureOnlyRotContacts( JoltPhysicsObject *pObject, OnlyRotTraceContactSummary &out )
+{
+	out.bEstimateEnabled = vjolt_contact_estimate.GetBool();
+	if ( !pObject || !out.bEstimateEnabled )
+		return;
+
+	std::array< JoltPhysicsObject::ContactPairData, ONLYROT_TRACE_MAX_CONTACTS > pairs{};
+	uint32 nStored = 0;
+	uint32 nTotal = 0;
+	out.bFresh = pObject->GetFreshContactPairs( pairs.data(), ONLYROT_TRACE_MAX_CONTACTS, nStored, nTotal );
+	out.nStored = nStored;
+	out.nTotal = nTotal;
+
+	for ( uint32 i = 0; i < nStored; ++i )
+	{
+		OnlyRotTraceContact &contact = out.contacts[i];
+		contact.other = CaptureOnlyRotBodyIdentity( pairs[i].pOther );
+		contact.vEstimatedNormalImpulse = OnlyRotTraceSourceVector( pairs[i].vImpulse );
+		contact.vContactPointSource = OnlyRotTraceSourceVector( pairs[i].vContactPoint );
+	}
+}
+
+static const char *OnlyRotTraceCompletionName( uint8 nCompletion )
+{
+	switch ( nCompletion )
+	{
+	case ONLYROT_TRACE_COMPLETE: return "complete";
+	case ONLYROT_TRACE_DESTROYED: return "destroyed_partial";
+	default: return "pending";
+	}
+}
+
+static const char *OnlyRotTraceMotionName( uint8 nMotionType )
+{
+	switch ( static_cast< JPH::EMotionType >( nMotionType ) )
+	{
+	case JPH::EMotionType::Static: return "static";
+	case JPH::EMotionType::Kinematic: return "kinematic";
+	case JPH::EMotionType::Dynamic: return "dynamic";
+	default: return "unknown";
+	}
+}
+
+static const char *OnlyRotTraceLayerName( uint16 nLayer )
+{
+	switch ( nLayer )
+	{
+	case Layers::NON_MOVING_WORLD: return "non_moving_world";
+	case Layers::NON_MOVING_OBJECT: return "non_moving_object";
+	case Layers::MOVING: return "moving";
+	case Layers::NO_COLLIDE: return "no_collide";
+	case Layers::DEBRIS: return "debris";
+	case Layers::MOVING_PLAYER: return "moving_player";
+	default: return "unknown";
+	}
+}
+
+static void DumpOnlyRotBodyState( uint32 nTraceID, uint32 nUpdate, const char *pszPhase, const char *pszEndpoint, const OnlyRotTraceBodyState &body )
+{
+	Msg( "vjolt_onlyrot_trace id=%u update=%u phase=%s endpoint=%s valid=%u body=%u game=%p src_static=%u src_motion=%u jolt_active=%u motion=%s(%u) layer=%s(%u) "
+		"pos_u=(%.6g %.6g %.6g) rot_q=(%.6g %.6g %.6g %.6g) vel_u_s=(%.6g %.6g %.6g) ang_deg_s=(%.6g %.6g %.6g)\n",
+		nTraceID, nUpdate, pszPhase, pszEndpoint, body.identity.bValid, body.identity.nBodyID,
+		reinterpret_cast< void * >( body.identity.nGameData ), body.identity.bSourceStatic, body.identity.bSourceMotionEnabled,
+		body.identity.bJoltActive, OnlyRotTraceMotionName( body.identity.nJoltMotionType ), body.identity.nJoltMotionType,
+		OnlyRotTraceLayerName( body.identity.nObjectLayer ), body.identity.nObjectLayer,
+		body.vPositionSource.x, body.vPositionSource.y, body.vPositionSource.z,
+		body.qRotation.x, body.qRotation.y, body.qRotation.z, body.qRotation.w,
+		body.vLinearVelocitySource.x, body.vLinearVelocitySource.y, body.vLinearVelocitySource.z,
+		body.vAngularVelocityDegrees.x, body.vAngularVelocityDegrees.y, body.vAngularVelocityDegrees.z );
+}
+
+static void DumpOnlyRotConstraintState( uint32 nTraceID, uint32 nUpdate, const char *pszPhase, const OnlyRotTraceConstraintState &constraint )
+{
+	Msg( "vjolt_onlyrot_trace id=%u update=%u phase=%s constraint_valid=%u enabled=%u active=%u subtype=%u rotation_cs_q=(%.6g %.6g %.6g %.6g)\n",
+		nTraceID, nUpdate, pszPhase, constraint.bValid, constraint.bEnabled, constraint.bActive, constraint.nSubType,
+		constraint.qRotationConstraintSpace.x, constraint.qRotationConstraintSpace.y,
+		constraint.qRotationConstraintSpace.z, constraint.qRotationConstraintSpace.w );
+}
+
+static void DumpOnlyRotRecord( const OnlyRotTraceRecord &record )
+{
+	Msg( "vjolt_onlyrot_trace id=%u generation=%u completion=%s pre=%u post=%u create_tick=%u tick_discontinuity=%u group=%u source_active=%u clockwise=%u dof_mask=0x%02x free_mask=0x%02x fixed_mask=0x%02x\n",
+		record.nTraceID, record.nGeneration, OnlyRotTraceCompletionName( record.nCompletion ), record.nPreUpdates,
+		record.nPostUpdates, record.nCreationContactTick, record.bAnyTickDiscontinuity, record.bHasGroup,
+		record.bSourceActive, record.bUseClockwiseRotations, record.nDegreesOfFreedomMask,
+		record.nFreeAxisMask, record.nFixedAxisMask );
+	Msg( "vjolt_onlyrot_trace id=%u creation limits_rad=((%.6g %.6g) (%.6g %.6g) (%.6g %.6g)) rotation_friction=(%.6g %.6g %.6g) "
+		"frame1_pos_u=(%.6g %.6g %.6g) frame1_x=(%.6g %.6g %.6g) frame1_y=(%.6g %.6g %.6g) "
+		"frame2_pos_u=(%.6g %.6g %.6g) frame2_x=(%.6g %.6g %.6g) frame2_y=(%.6g %.6g %.6g)\n",
+		record.nTraceID,
+		record.flLimitMinRadians[0], record.flLimitMaxRadians[0], record.flLimitMinRadians[1], record.flLimitMaxRadians[1],
+		record.flLimitMinRadians[2], record.flLimitMaxRadians[2], record.flRotationMaxFriction[0],
+		record.flRotationMaxFriction[1], record.flRotationMaxFriction[2],
+		record.vPosition1Source.x, record.vPosition1Source.y, record.vPosition1Source.z,
+		record.vAxisX1.x, record.vAxisX1.y, record.vAxisX1.z, record.vAxisY1.x, record.vAxisY1.y, record.vAxisY1.z,
+		record.vPosition2Source.x, record.vPosition2Source.y, record.vPosition2Source.z,
+		record.vAxisX2.x, record.vAxisX2.y, record.vAxisX2.z, record.vAxisY2.x, record.vAxisY2.y, record.vAxisY2.z );
+
+	DumpOnlyRotBodyState( record.nTraceID, 0, "creation", "reference", record.creationBodies[0] );
+	DumpOnlyRotBodyState( record.nTraceID, 0, "creation", "attached", record.creationBodies[1] );
+	DumpOnlyRotConstraintState( record.nTraceID, 0, "creation", record.creationConstraint );
+
+	for ( uint32 nUpdate = 0; nUpdate < ONLYROT_TRACE_UPDATE_COUNT; ++nUpdate )
+	{
+		const OnlyRotTraceUpdate &update = record.updates[nUpdate];
+		if ( !update.bPreCaptured && !update.bPostCaptured )
+			continue;
+
+		Msg( "vjolt_onlyrot_trace id=%u update=%u pre_tick=%u post_tick=%u pre_captured=%u post_captured=%u tick_discontinuity=%u "
+			"lambda_position_jolt=(%.6g %.6g %.6g) lambda_rotation_jolt=(%.6g %.6g %.6g)\n",
+			record.nTraceID, nUpdate + 1, update.nPreContactTick, update.nPostContactTick,
+			update.bPreCaptured, update.bPostCaptured, update.bTickDiscontinuity,
+			update.vLambdaPosition.x, update.vLambdaPosition.y, update.vLambdaPosition.z,
+			update.vLambdaRotation.x, update.vLambdaRotation.y, update.vLambdaRotation.z );
+
+		if ( update.bPreCaptured )
+		{
+			DumpOnlyRotBodyState( record.nTraceID, nUpdate + 1, "pre", "reference", update.preBodies[0] );
+			DumpOnlyRotBodyState( record.nTraceID, nUpdate + 1, "pre", "attached", update.preBodies[1] );
+			DumpOnlyRotConstraintState( record.nTraceID, nUpdate + 1, "pre", update.preConstraint );
+		}
+		if ( !update.bPostCaptured )
+			continue;
+
+		DumpOnlyRotBodyState( record.nTraceID, nUpdate + 1, "post", "reference", update.postBodies[0] );
+		DumpOnlyRotBodyState( record.nTraceID, nUpdate + 1, "post", "attached", update.postBodies[1] );
+		DumpOnlyRotConstraintState( record.nTraceID, nUpdate + 1, "post", update.postConstraint );
+
+		for ( uint32 nEndpoint = 0; nEndpoint < 2; ++nEndpoint )
+		{
+			const char *pszEndpoint = nEndpoint == 0 ? "reference" : "attached";
+			const OnlyRotTraceContactSummary &summary = update.contacts[nEndpoint];
+			Msg( "vjolt_onlyrot_trace id=%u update=%u endpoint=%s contact_estimate_enabled=%u fresh=%u stored=%u total=%u truncated=%u\n",
+				record.nTraceID, nUpdate + 1, pszEndpoint, summary.bEstimateEnabled, summary.bFresh,
+				summary.nStored, summary.nTotal, summary.nTotal > summary.nStored );
+			for ( uint32 i = 0; i < summary.nStored; ++i )
+			{
+				const OnlyRotTraceContact &contact = summary.contacts[i];
+				Msg( "vjolt_onlyrot_trace id=%u update=%u endpoint=%s contact=%u other_valid=%u other_body=%u other_game=%p "
+					"other_src_static=%u other_src_motion=%u other_active=%u other_motion=%s(%u) other_layer=%s(%u) "
+					"estimated_normal_impulse_kg_m_s=(%.6g %.6g %.6g) point_u=(%.6g %.6g %.6g)\n",
+					record.nTraceID, nUpdate + 1, pszEndpoint, i, contact.other.bValid, contact.other.nBodyID,
+					reinterpret_cast< void * >( contact.other.nGameData ), contact.other.bSourceStatic,
+					contact.other.bSourceMotionEnabled, contact.other.bJoltActive,
+					OnlyRotTraceMotionName( contact.other.nJoltMotionType ), contact.other.nJoltMotionType,
+					OnlyRotTraceLayerName( contact.other.nObjectLayer ), contact.other.nObjectLayer,
+					contact.vEstimatedNormalImpulse.x, contact.vEstimatedNormalImpulse.y, contact.vEstimatedNormalImpulse.z,
+					contact.vContactPointSource.x, contact.vContactPointSource.y, contact.vContactPointSource.z );
+			}
+		}
+	}
+
+	Msg( "vjolt_onlyrot_trace id=%u recapture_calls=%u last_tick=%u last_countdown_before=%d rebuilt=%u old_enabled=%u "
+		"relative_q=(%.6g %.6g %.6g %.6g) old_x1=(%.6g %.6g %.6g) old_y1=(%.6g %.6g %.6g) "
+		"new_x1=(%.6g %.6g %.6g) new_y1=(%.6g %.6g %.6g)\n",
+		record.nTraceID, record.recapture.nCalls, record.recapture.nLastTick, record.recapture.nLastCountdownBefore,
+		record.recapture.bRebuilt, record.recapture.bOldEnabled,
+		record.recapture.qReferenceToAttached.x, record.recapture.qReferenceToAttached.y,
+		record.recapture.qReferenceToAttached.z, record.recapture.qReferenceToAttached.w,
+		record.recapture.vOldAxisX1.x, record.recapture.vOldAxisX1.y, record.recapture.vOldAxisX1.z,
+		record.recapture.vOldAxisY1.x, record.recapture.vOldAxisY1.y, record.recapture.vOldAxisY1.z,
+		record.recapture.vNewAxisX1.x, record.recapture.vNewAxisX1.y, record.recapture.vNewAxisX1.z,
+		record.recapture.vNewAxisY1.x, record.recapture.vNewAxisY1.y, record.recapture.vNewAxisY1.z );
+}
+
+static void PrintOnlyRotTraceStatus()
+{
+	Msg( "vjolt_onlyrot_trace_status generation=%u armed=%u pending=%u live=%u completed=%u dropped=%u capacity=%u contacts_per_endpoint=%u\n",
+		g_nOnlyRotTraceGeneration, g_nOnlyRotTraceArmBudget, g_nOnlyRotTracePending, g_nOnlyRotTraceLive,
+		g_nOnlyRotTraceCompleted, g_nOnlyRotTraceDropped, ONLYROT_TRACE_MAX_RECORDS, ONLYROT_TRACE_MAX_CONTACTS );
+}
+
+CON_COMMAND( vjolt_onlyrot_trace_next, "Arm bounded first-two-update diagnostics for the next N rotation-only constraints (0-64)." )
+{
+	if ( args.ArgC() != 2 )
+	{
+		Msg( "usage: vjolt_onlyrot_trace_next <0-%u>\n", ONLYROT_TRACE_MAX_RECORDS );
+		PrintOnlyRotTraceStatus();
+		return;
+	}
+
+	const int nRequested = atoi( args.Arg( 1 ) );
+	const uint32 nReserved = Min( ONLYROT_TRACE_MAX_RECORDS, g_nOnlyRotTraceLive + g_nOnlyRotTraceCompleted );
+	const uint32 nAvailable = ONLYROT_TRACE_MAX_RECORDS - nReserved;
+	g_nOnlyRotTraceArmBudget = static_cast< uint32 >( Clamp( nRequested, 0, static_cast< int >( nAvailable ) ) );
+	PrintOnlyRotTraceStatus();
+}
+
+CON_COMMAND( vjolt_onlyrot_trace_status, "Report bounded rotation-only trace counters without dumping records." )
+{
+	PrintOnlyRotTraceStatus();
+}
+
+CON_COMMAND( vjolt_onlyrot_trace_dump, "Dump one completed bounded rotation-only trace by zero-based record index, after physics settles." )
+{
+	PrintOnlyRotTraceStatus();
+	if ( args.ArgC() != 2 )
+	{
+		Msg( "usage: vjolt_onlyrot_trace_dump <record_index>; valid range is 0..%d\n",
+			g_nOnlyRotTraceCompleted > 0 ? static_cast< int >( g_nOnlyRotTraceCompleted - 1 ) : -1 );
+		return;
+	}
+
+	const int nRecord = atoi( args.Arg( 1 ) );
+	if ( nRecord < 0 || static_cast< uint32 >( nRecord ) >= g_nOnlyRotTraceCompleted )
+	{
+		Msg( "vjolt_onlyrot_trace_dump invalid record_index=%d; valid range is 0..%d\n", nRecord,
+			g_nOnlyRotTraceCompleted > 0 ? static_cast< int >( g_nOnlyRotTraceCompleted - 1 ) : -1 );
+		return;
+	}
+
+	Msg( "vjolt_onlyrot_trace_dump record_index=%d generation=%u trace_id=%u completed=%u dropped=%u pending=%u live=%u\n",
+		nRecord, g_OnlyRotTraceCompleted[nRecord].nGeneration, g_OnlyRotTraceCompleted[nRecord].nTraceID,
+		g_nOnlyRotTraceCompleted, g_nOnlyRotTraceDropped, g_nOnlyRotTracePending, g_nOnlyRotTraceLive );
+	DumpOnlyRotRecord( g_OnlyRotTraceCompleted[nRecord] );
+}
+
+CON_COMMAND( vjolt_onlyrot_trace_clear, "Disarm and clear rotation-only trace diagnostics; in-flight older-generation traces self-discard." )
+{
+	g_nOnlyRotTraceArmBudget = 0;
+	g_nOnlyRotTracePending = 0;
+	g_nOnlyRotTraceCompleted = 0;
+	g_nOnlyRotTraceDropped = 0;
+	if ( ++g_nOnlyRotTraceGeneration == 0 )
+		++g_nOnlyRotTraceGeneration;
+	PrintOnlyRotTraceStatus();
+}
 
 //-------------------------------------------------------------------------------------------------
 
@@ -446,9 +925,12 @@ void JoltPhysicsConstraint::InitialiseRagdoll( IPhysicsConstraintGroup *pGroup, 
 	const float flMinTorqueFriction = vjolt_ragdoll_min_torque_friction.GetFloat();
 
 	JPH::Constraint *pConstraint = nullptr;
+	bool bArmOnlyRotTrace = false;
+	JPH::Ref< JPH::SixDOFConstraintSettings > pOnlyRotTraceSettings;
 
 	if ( ragdoll.onlyAngularLimits )
 	{
+		bArmOnlyRotTrace = g_nOnlyRotTraceArmBudget > 0;
 		// "Constrain rotation only" (GMod AdvBallsocket onlyrotation): the relative
 		// POSITION must stay free -- contraptions hang position off ropes/elastics
 		// (or nothing) and constrain only the relative orientation. LVS/simfphys
@@ -526,6 +1008,8 @@ void JoltPhysicsConstraint::InitialiseRagdoll( IPhysicsConstraintGroup *pGroup, 
 		}
 
 		pConstraint = settings->Create( *pRefBody, *pAttBody );
+		if ( bArmOnlyRotTrace )
+			pOnlyRotTraceSettings = settings;
 
 		// The frames above came from Source matrices captured at the Lua call.
 		// LVS/simfphys teleport wheels and steer anchors into their intended
@@ -594,6 +1078,54 @@ void JoltPhysicsConstraint::InitialiseRagdoll( IPhysicsConstraintGroup *pGroup, 
 	m_pConstraint = pConstraint;
 	m_pConstraint->SetEnabled( bActive );
 	m_pPhysicsSystem->AddConstraint( m_pConstraint );
+
+	if ( pOnlyRotTraceSettings )
+	{
+		--g_nOnlyRotTraceArmBudget;
+		m_pOnlyRotTrace = std::make_unique< OnlyRotTraceLive >();
+		++g_nOnlyRotTraceLive;
+		OnlyRotTraceRecord &record = m_pOnlyRotTrace->record;
+		record.nGeneration = g_nOnlyRotTraceGeneration;
+		record.nTraceID = g_nOnlyRotTraceNextID++;
+		if ( g_nOnlyRotTraceNextID == 0 )
+			g_nOnlyRotTraceNextID = 1;
+		record.nCreationContactTick = m_pPhysicsEnvironment->GetContactDataTick();
+		record.bHasGroup = m_pGroup != nullptr;
+		record.bSourceActive = ragdoll.constraint.isActive;
+		record.bUseClockwiseRotations = ragdoll.useClockwiseRotations;
+		record.nDegreesOfFreedomMask = static_cast< uint8 >( uDOFMask );
+
+		for ( int i = 0; i < 3; ++i )
+		{
+			record.flLimitMinRadians[i] = limits.lAxisLimitsRad[i].Min;
+			record.flLimitMaxRadians[i] = limits.lAxisLimitsRad[i].Max;
+			const JPH::SixDOFConstraintSettings::EAxis eAxis =
+				static_cast< JPH::SixDOFConstraintSettings::EAxis >( JPH::SixDOFConstraintSettings::EAxis::RotationX + i );
+			record.flRotationMaxFriction[i] = pOnlyRotTraceSettings->mMaxFriction[eAxis];
+		}
+
+		for ( int i = 0; i < static_cast< int >( JPH::SixDOFConstraintSettings::EAxis::Num ); ++i )
+		{
+			const JPH::SixDOFConstraintSettings::EAxis eAxis = static_cast< JPH::SixDOFConstraintSettings::EAxis >( i );
+			if ( pOnlyRotTraceSettings->IsFreeAxis( eAxis ) )
+				record.nFreeAxisMask |= 1u << i;
+			if ( pOnlyRotTraceSettings->IsFixedAxis( eAxis ) )
+				record.nFixedAxisMask |= 1u << i;
+		}
+
+		record.vPosition1Source = OnlyRotTraceSourcePosition( pOnlyRotTraceSettings->mPosition1 );
+		record.vAxisX1 = OnlyRotTraceUnitless( pOnlyRotTraceSettings->mAxisX1 );
+		record.vAxisY1 = OnlyRotTraceUnitless( pOnlyRotTraceSettings->mAxisY1 );
+		record.vPosition2Source = OnlyRotTraceSourcePosition( pOnlyRotTraceSettings->mPosition2 );
+		record.vAxisX2 = OnlyRotTraceUnitless( pOnlyRotTraceSettings->mAxisX2 );
+		record.vAxisY2 = OnlyRotTraceUnitless( pOnlyRotTraceSettings->mAxisY2 );
+		record.creationBodies[0] = CaptureOnlyRotBodyState( m_pObjReference );
+		record.creationBodies[1] = CaptureOnlyRotBodyState( m_pObjAttached );
+		record.creationConstraint = CaptureOnlyRotConstraintState( m_pConstraint );
+
+		++g_nOnlyRotTracePending;
+		m_pPhysicsEnvironment->RegisterOnlyRotTraceConstraint( this );
+	}
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -903,9 +1435,125 @@ static float MaxInverseMass( JoltPhysicsObject *pA, JoltPhysicsObject *pB )
 	return Max( invMassOf( pA ), invMassOf( pB ) );
 }
 
+void JoltPhysicsConstraint::DiscardStaleOnlyRotTrace()
+{
+	if ( m_pOnlyRotTrace && m_pOnlyRotTrace->record.nGeneration != g_nOnlyRotTraceGeneration )
+		ReleaseOnlyRotTraceLive( m_pOnlyRotTrace );
+}
+
+void JoltPhysicsConstraint::FinishOnlyRotTrace( uint8 nCompletion )
+{
+	if ( !m_pOnlyRotTrace )
+		return;
+
+	if ( m_pOnlyRotTrace->record.nGeneration != g_nOnlyRotTraceGeneration )
+	{
+		ReleaseOnlyRotTraceLive( m_pOnlyRotTrace );
+		return;
+	}
+
+	OnlyRotTraceRecord &record = m_pOnlyRotTrace->record;
+	record.nCompletion = nCompletion;
+	record.nPreUpdates = m_pOnlyRotTrace->nPreUpdates;
+	record.nPostUpdates = m_pOnlyRotTrace->nPostUpdates;
+
+	if ( g_nOnlyRotTraceCompleted < ONLYROT_TRACE_MAX_RECORDS )
+		g_OnlyRotTraceCompleted[g_nOnlyRotTraceCompleted++] = record;
+	else
+		++g_nOnlyRotTraceDropped;
+
+	if ( g_nOnlyRotTracePending > 0 )
+		--g_nOnlyRotTracePending;
+	ReleaseOnlyRotTraceLive( m_pOnlyRotTrace );
+}
+
+bool JoltPhysicsConstraint::TraceOnlyRotPreSimulate()
+{
+	DiscardStaleOnlyRotTrace();
+	if ( !m_pOnlyRotTrace )
+		return false;
+
+	if ( !m_pConstraint || !m_pObjReference || !m_pObjAttached )
+	{
+		FinishOnlyRotTrace( ONLYROT_TRACE_DESTROYED );
+		return false;
+	}
+
+	if ( m_pOnlyRotTrace->nPreUpdates >= ONLYROT_TRACE_UPDATE_COUNT )
+		return false;
+
+	OnlyRotTraceUpdate &update = m_pOnlyRotTrace->record.updates[m_pOnlyRotTrace->nPreUpdates];
+	update.bPreCaptured = 1;
+	update.nPreContactTick = m_pPhysicsEnvironment->GetContactDataTick();
+	update.preBodies[0] = CaptureOnlyRotBodyState( m_pObjReference );
+	update.preBodies[1] = CaptureOnlyRotBodyState( m_pObjAttached );
+	update.preConstraint = CaptureOnlyRotConstraintState( m_pConstraint );
+	++m_pOnlyRotTrace->nPreUpdates;
+	return m_pOnlyRotTrace->nPreUpdates < ONLYROT_TRACE_UPDATE_COUNT;
+}
+
+void JoltPhysicsConstraint::TraceOnlyRotPostBegin()
+{
+	DiscardStaleOnlyRotTrace();
+	if ( !m_pOnlyRotTrace )
+		return;
+
+	if ( !m_pConstraint || !m_pObjReference || !m_pObjAttached )
+	{
+		FinishOnlyRotTrace( ONLYROT_TRACE_DESTROYED );
+		return;
+	}
+
+	if ( m_pOnlyRotTrace->nPostUpdates >= ONLYROT_TRACE_UPDATE_COUNT )
+		return;
+
+	OnlyRotTraceUpdate &update = m_pOnlyRotTrace->record.updates[m_pOnlyRotTrace->nPostUpdates];
+	update.bPostCaptured = 1;
+	update.nPostContactTick = m_pPhysicsEnvironment->GetContactDataTick();
+	if ( !update.bPreCaptured || update.nPostContactTick - update.nPreContactTick != 1 )
+	{
+		update.bTickDiscontinuity = 1;
+		m_pOnlyRotTrace->record.bAnyTickDiscontinuity = 1;
+	}
+
+	update.postBodies[0] = CaptureOnlyRotBodyState( m_pObjReference );
+	update.postBodies[1] = CaptureOnlyRotBodyState( m_pObjAttached );
+	update.postConstraint = CaptureOnlyRotConstraintState( m_pConstraint );
+	CaptureOnlyRotContacts( m_pObjReference, update.contacts[0] );
+	CaptureOnlyRotContacts( m_pObjAttached, update.contacts[1] );
+
+	if ( m_pConstraint->GetSubType() == JPH::EConstraintSubType::SixDOF )
+	{
+		const JPH::SixDOFConstraint *pSixDOF = static_cast< const JPH::SixDOFConstraint * >( m_pConstraint.GetPtr() );
+		update.vLambdaPosition = OnlyRotTraceUnitless( pSixDOF->GetTotalLambdaPosition() );
+		update.vLambdaRotation = OnlyRotTraceUnitless( pSixDOF->GetTotalLambdaRotation() );
+	}
+
+	++m_pOnlyRotTrace->nPostUpdates;
+}
+
+void JoltPhysicsConstraint::TraceOnlyRotPostEnd()
+{
+	if ( m_pOnlyRotTrace && m_pOnlyRotTrace->nPostUpdates >= ONLYROT_TRACE_UPDATE_COUNT )
+		FinishOnlyRotTrace( ONLYROT_TRACE_COMPLETE );
+}
+
 void JoltPhysicsConstraint::PostSimulate()
 {
-	RecaptureRotOnlyFrames();
+	// Keep the normal path to one predictable null branch. For an armed trace,
+	// snapshot lambda/contact state before the legacy c356 recapture can replace
+	// the second-update constraint with a new, not-yet-solved SixDOF; complete
+	// the record only after the rebuild event has been recorded.
+	if ( m_pOnlyRotTrace )
+	{
+		TraceOnlyRotPostBegin();
+		RecaptureRotOnlyFrames();
+		TraceOnlyRotPostEnd();
+	}
+	else
+	{
+		RecaptureRotOnlyFrames();
+	}
 	HardenLengthSpring();
 	CheckBroken();
 }
@@ -933,6 +1581,15 @@ void JoltPhysicsConstraint::RecaptureRotOnlyFrames()
 	if ( m_nRotOnlyRecaptureTicks <= 0 )
 		return;
 
+	OnlyRotTraceRecapture *pTraceRecapture = nullptr;
+	if ( m_pOnlyRotTrace && m_pOnlyRotTrace->record.nGeneration == g_nOnlyRotTraceGeneration )
+	{
+		pTraceRecapture = &m_pOnlyRotTrace->record.recapture;
+		++pTraceRecapture->nCalls;
+		pTraceRecapture->nLastTick = m_pPhysicsEnvironment->GetContactDataTick();
+		pTraceRecapture->nLastCountdownBefore = m_nRotOnlyRecaptureTicks;
+	}
+
 	if ( --m_nRotOnlyRecaptureTicks > 0 )
 		return;
 
@@ -949,10 +1606,24 @@ void JoltPhysicsConstraint::RecaptureRotOnlyFrames()
 	// actually settled into (after LVS's constrain-then-teleport init) becomes
 	// the joint's rest pose instead of whatever the mid-transient capture was.
 	const JPH::Quat qRefToAtt = pRefBody->GetRotation().Conjugated() * pAttBody->GetRotation();
+	if ( pTraceRecapture )
+	{
+		pTraceRecapture->bRebuilt = 1;
+		pTraceRecapture->qReferenceToAttached = OnlyRotTraceQuaternion( qRefToAtt );
+		pTraceRecapture->vOldAxisX1 = OnlyRotTraceUnitless( settings->mAxisX1 );
+		pTraceRecapture->vOldAxisY1 = OnlyRotTraceUnitless( settings->mAxisY1 );
+	}
 	settings->mAxisX1 = qRefToAtt * settings->mAxisX2;
 	settings->mAxisY1 = qRefToAtt * settings->mAxisY2;
+	if ( pTraceRecapture )
+	{
+		pTraceRecapture->vNewAxisX1 = OnlyRotTraceUnitless( settings->mAxisX1 );
+		pTraceRecapture->vNewAxisY1 = OnlyRotTraceUnitless( settings->mAxisY1 );
+	}
 
 	const bool bEnabled = m_pConstraint->GetEnabled();
+	if ( pTraceRecapture )
+		pTraceRecapture->bOldEnabled = bEnabled;
 	m_pPhysicsSystem->RemoveConstraint( m_pConstraint );
 	m_pConstraint = settings->Create( *pRefBody, *pAttBody );
 	m_pConstraint->SetEnabled( bEnabled );
@@ -1027,6 +1698,9 @@ void JoltPhysicsConstraint::SetGroup( IPhysicsConstraintGroup *pGroup )
 
 void JoltPhysicsConstraint::DestroyConstraint()
 {
+	if ( m_pOnlyRotTrace )
+		FinishOnlyRotTrace( ONLYROT_TRACE_DESTROYED );
+
 	if ( m_pObjAttached )
 	{
 		m_pObjAttached->RemoveDestroyedListener( this );

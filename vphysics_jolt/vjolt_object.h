@@ -371,6 +371,11 @@ public:
 	// and stale entries may name since-destroyed objects (the destructor scrubs
 	// itself from CURRENT partners only), so stale data must never be surfaced.
 	bool GetFreshContactPairs( std::vector< ContactPairData > &out ) const;
+	// Fixed-cap diagnostic variant. Copies at most nCapacity entries without
+	// allocating, while reporting the full fresh-pair count so truncation is
+	// explicit. pOut entries contain live pointers only for the duration of the
+	// main-thread caller; callers must copy stable identity/state immediately.
+	bool GetFreshContactPairs( ContactPairData *pOut, uint32 nCapacity, uint32 &nOutCount, uint32 &nTotalCount ) const;
 
 	// Scrub ourselves from partners' maps (fresh-only walk, see impl) and drop
 	// our own map. Runs on destruction and when leaving an environment: after a
