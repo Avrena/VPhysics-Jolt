@@ -43,6 +43,11 @@ static ConVar vjolt_onlyrot_recapture_ticks( "vjolt_onlyrot_recapture_ticks", "2
 	"AFTER constraining them, so the creation-time frames bake the spawn transient in as permanent "
 	"joint error." );
 
+static ConVar vjolt_onlyrot_harden_tiny_after_recapture( "vjolt_onlyrot_harden_tiny_after_recapture", "0", FCVAR_NONE,
+	"After re-zeroing a rotation-only constraint, convert authored rotation windows <= 1 degree to "
+	"fixed axes. This keeps the creation-time compliant window, preserves free wheel-spin axes, and "
+	"is default-off until vehicle and general-constraint regression testing is complete." );
+
 // Diagnostic knob, default off: hardening mid-settle freezes whatever pose the spawn
 // transient left (live trials: 30 ticks @ 8 Hz made LVS tank tilt WORSE, 6/6 vs 7/12
 // baseline). The gentler vjolt_baumgarte_factor was an earlier M3A3 mitigation,
@@ -187,6 +192,7 @@ struct OnlyRotTraceRecapture
 	int nLastCountdownBefore = 0;
 	uint8 bRebuilt = 0;
 	uint8 bOldEnabled = 0;
+	uint8 nHardenedRotationAxisMask = 0;
 	OnlyRotTraceQuat qReferenceToAttached;
 	OnlyRotTraceVec3 vOldAxisX1;
 	OnlyRotTraceVec3 vOldAxisY1;
@@ -528,11 +534,11 @@ static void DumpOnlyRotRecord( const OnlyRotTraceRecord &record )
 		}
 	}
 
-	Msg( "vjolt_onlyrot_trace id=%u recapture_calls=%u last_tick=%u last_countdown_before=%d rebuilt=%u old_enabled=%u "
+	Msg( "vjolt_onlyrot_trace id=%u recapture_calls=%u last_tick=%u last_countdown_before=%d rebuilt=%u old_enabled=%u hardened_rotation_mask=0x%02x "
 		"relative_q=(%.6g %.6g %.6g %.6g) old_x1=(%.6g %.6g %.6g) old_y1=(%.6g %.6g %.6g) "
 		"new_x1=(%.6g %.6g %.6g) new_y1=(%.6g %.6g %.6g)\n",
 		record.nTraceID, record.recapture.nCalls, record.recapture.nLastTick, record.recapture.nLastCountdownBefore,
-		record.recapture.bRebuilt, record.recapture.bOldEnabled,
+		record.recapture.bRebuilt, record.recapture.bOldEnabled, record.recapture.nHardenedRotationAxisMask,
 		record.recapture.qReferenceToAttached.x, record.recapture.qReferenceToAttached.y,
 		record.recapture.qReferenceToAttached.z, record.recapture.qReferenceToAttached.w,
 		record.recapture.vOldAxisX1.x, record.recapture.vOldAxisX1.y, record.recapture.vOldAxisX1.z,
@@ -1133,6 +1139,8 @@ void JoltPhysicsConstraint::InitialiseRagdoll( IPhysicsConstraintGroup *pGroup, 
 					Max( flCenter - flHalfRange, -JPH::JPH_PI ),
 					Min( flCenter + flHalfRange, JPH::JPH_PI ) );
 				settings->mMaxFriction[ eAxis ] = Max( settings->mMaxFriction[ eAxis ], flMinTorqueFriction );
+				if ( vjolt_onlyrot_harden_tiny_after_recapture.GetBool() )
+					m_nRotOnlyHardenAxisMask |= 1u << i;
 			}
 			else if ( flRange >= DEG2RAD( 359.0f ) )
 			{
@@ -1797,10 +1805,19 @@ void JoltPhysicsConstraint::RecaptureRotOnlyFrames()
 	}
 	settings->mAxisX1 = qRefToAtt * settings->mAxisX2;
 	settings->mAxisY1 = qRefToAtt * settings->mAxisY2;
+	for ( int i = 0; i < 3; ++i )
+	{
+		if ( ( m_nRotOnlyHardenAxisMask & ( 1u << i ) ) == 0 )
+			continue;
+		const JPH::SixDOFConstraintSettings::EAxis eAxis =
+			static_cast< JPH::SixDOFConstraintSettings::EAxis >( JPH::SixDOFConstraintSettings::EAxis::RotationX + i );
+		settings->MakeFixedAxis( eAxis );
+	}
 	if ( pTraceRecapture )
 	{
 		pTraceRecapture->vNewAxisX1 = OnlyRotTraceUnitless( settings->mAxisX1 );
 		pTraceRecapture->vNewAxisY1 = OnlyRotTraceUnitless( settings->mAxisY1 );
+		pTraceRecapture->nHardenedRotationAxisMask = m_nRotOnlyHardenAxisMask;
 	}
 
 	const bool bEnabled = m_pConstraint->GetEnabled();
@@ -1896,6 +1913,7 @@ void JoltPhysicsConstraint::DestroyConstraint()
 
 	m_pRotOnlySettings = nullptr;
 	m_nRotOnlyRecaptureTicks = 0;
+	m_nRotOnlyHardenAxisMask = 0;
 	m_nLengthSpringWarmupTicks = 0;
 
 	if ( m_pConstraint )
