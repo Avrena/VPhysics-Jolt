@@ -23,3 +23,16 @@ ConVar vjolt_contact_estimate( "vjolt_contact_estimate", "1", FCVAR_NONE,
 // touch-damage territory.
 ConVar vjolt_shadow_collision_min_speed( "vjolt_shadow_collision_min_speed", "150", FCVAR_NONE,
 	"Min approach speed (u/s) for player-shadow collision events. 0 = emit all (stock behavior)." );
+
+#if GAME_GMOD
+// Garry's Mod exposes collision callbacks to Lua as Entity:PhysicsCollide. Unlike the
+// base games, those callbacks can own gameplay rather than only impact sounds/damage.
+// Keep a tiny non-zero floor so Jolt manifold re-adds for resting contacts do not spam
+// Lua, and retain a configurable safety cap for pathological contact scenes.
+ConVar vjolt_collision_callback_min_speed( "vjolt_collision_callback_min_speed", "0.01", FCVAR_NONE,
+	"Min approach speed (u/s) for ordinary GMod PhysicsCollide callbacks. 0 = emit every manifold add.",
+	true, 0.0f, false, 0.0f );
+ConVar vjolt_collision_callback_max_events( "vjolt_collision_callback_max_events", "64", FCVAR_NONE,
+	"Max ordinary GMod PhysicsCollide callbacks per simulation frame. 0 = unlimited.",
+	true, 0.0f, true, 4096.0f );
+#endif

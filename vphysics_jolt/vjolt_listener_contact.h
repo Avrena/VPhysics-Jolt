@@ -12,6 +12,9 @@ extern ConVar vjolt_contact_estimate;
 extern ConVar vjolt_shadow_collision_min_speed;
 
 #if GAME_GMOD
+extern ConVar vjolt_collision_callback_min_speed;
+extern ConVar vjolt_collision_callback_max_events;
+
 // Defined in vjolt_object.cpp. Returns true iff pObject is still in the live-object registry
 // (g_pObjects) -- a pointer-membership test only, never dereferences pObject, so it is safe on a
 // stale/freed pointer (the wrapper is Unregistered at the top of ~JoltPhysicsObject).
@@ -117,15 +120,6 @@ public:
 
 		if ( bIsCollision || bIsShadowCollision )
 		{
-			// Josh:
-			// We know ahead of time what this is used for (playing sounds and such)
-			// and it is not easily threadable
-			// (unlike the StartTouch objects which we can get away as long as the objects themselves aren't concurrent it seems)
-			// To avoid this causing locks and therefore lagging with many objects,
-			// we can just know ahead of time what is going to cause a sound to play, which is
-			// hardcoded at speed > 70.0f and deltaTime < 0.05 (the latter of which we don't track)
-			// So we can just avoid sending these PreCollision in this case.
-
 			const Vector vecCollideNormal = Vector( inManifold.mWorldSpaceNormal.GetX(), inManifold.mWorldSpaceNormal.GetY(), inManifold.mWorldSpaceNormal.GetZ() );
 			const float flCollisionSpeed = JoltPhysicsCollisionEvent::GetCollisionSpeed( pObject1, pObject2, vecCollideNormal );
 
@@ -139,6 +133,21 @@ public:
 				( pObject1->GetGameFlags() & FVPHYSICS_PLAYER_HELD ) ||
 				( pObject2->GetGameFlags() & FVPHYSICS_PLAYER_HELD );
 
+		#if GAME_GMOD
+			// Entity:PhysicsCollide is a gameplay callback in GMod. Billiards, breakable
+			// contraptions and other scripted entities can depend on low-speed impacts, so
+			// sound eligibility is not a valid proxy for whether the callback is needed.
+			// The approach-speed floor rejects resting manifold churn while still allowing
+			// scripted settle thresholds far below one Source unit per second.
+			const int nMaxCollisionEvents = vjolt_collision_callback_max_events.GetInt();
+			const bool bUnderCollisionEventLimit = nMaxCollisionEvents <= 0 ||
+				m_GlobalCollisionEventCount.load( std::memory_order_relaxed ) < static_cast< uint32 >( nMaxCollisionEvents );
+			const bool bSendOrdinaryCollisionCallback = bIsCollision && !bHeldByPlayer &&
+				flCollisionSpeed >= vjolt_collision_callback_min_speed.GetFloat() &&
+				bUnderCollisionEventLimit;
+		#else
+			// Base games only use this path for impact effects/damage. Preserve the
+			// historical sound-speed filter and tight cap outside GMod.
 			const bool bHasSound =
 				flCollisionSpeed >= 70.0f &&
 				!bHeldByPlayer &&
@@ -146,15 +155,17 @@ public:
 				pObject2->GetGameMaterialAllowsSounds();
 
 			const bool bSane = m_GlobalCollisionEventCount < MaxCollisionEvents;
+			const bool bSendOrdinaryCollisionCallback = bHasSound && bSane;
+		#endif
 
-			// Shadow-pair events (player vs prop) bypass the sound-speed gate and the event
-			// cap because the game needs them for impact damage -- but Jolt re-adds
+			// Shadow-pair events (player vs prop) bypass the ordinary callback gate and cap
+			// because the game needs them for impact damage -- but Jolt re-adds
 			// manifolds every few ticks for moving contacts, so a player standing against a
 			// prop otherwise emits full impact events at rub speed. Gate on the pair's
 			// approach speed: player impact damage thresholds start around ~300 u/s, so a
 			// server can set the convar there and "player rubs prop" emits nothing while
-			// "prop flies into player" still hurts. Default 0 preserves stock behavior.
-			const bool bSendCollisionCallback = ( bHasSound && bSane ) ||
+			// "prop flies into player" still hurts.
+			const bool bSendCollisionCallback = bSendOrdinaryCollisionCallback ||
 				( bIsShadowCollision && flCollisionSpeed >= vjolt_shadow_collision_min_speed.GetFloat() );
 
 			if ( bSendCollisionCallback )
@@ -166,7 +177,8 @@ public:
 				m_CollisionEvents.EmplaceBack( GetThreadId(),
 					JoltPhysicsCollisionInfo( pObject1, pObject2, inManifold ),
 					StampPairCollisionTime( pObject1, pObject2 ) );
-				m_GlobalCollisionEventCount++;
+				if ( bSendOrdinaryCollisionCallback )
+					m_GlobalCollisionEventCount++;
 			}
 		}
 
