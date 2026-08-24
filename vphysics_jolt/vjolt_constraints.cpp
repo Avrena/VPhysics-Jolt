@@ -6,6 +6,7 @@
 
 #include "cbase.h"
 
+#include <cmath>
 #include <optional>
 
 #include "vjolt_environment.h"
@@ -40,6 +41,19 @@ static ConVar vjolt_onlyrot_recapture_ticks( "vjolt_onlyrot_recapture_ticks", "2
 	"AFTER constraining them, so the creation-time frames bake the spawn transient in as permanent "
 	"joint error." );
 
+static ConVar vjolt_onlyrot_tiny_axis_motor_frequency( "vjolt_onlyrot_tiny_axis_motor_frequency", "10", FCVAR_NONE,
+	"Position-motor frequency (Hz) for canonical dynamic-to-static rotation-only wheel joints with "
+	"a free spin axis and near-zero Y/Z windows. 0 disables the motor.",
+	true, 0.0f, true, 20.0f );
+static ConVar vjolt_onlyrot_tiny_axis_motor_damping( "vjolt_onlyrot_tiny_axis_motor_damping", "1", FCVAR_NONE,
+	"Damping ratio for the canonical rotation-only wheel alignment motor.",
+	true, 0.0f, true, 4.0f );
+static ConVar vjolt_onlyrot_tiny_axis_position_steps( "vjolt_onlyrot_tiny_axis_position_steps", "4", FCVAR_NONE,
+	"Position iterations requested by canonical rotation-only wheel constraints. Jolt applies the "
+	"maximum constraint override to the connected island, so this also stabilizes the wheel's "
+	"suspension graph without raising the global position-step count. 0 disables the override.",
+	true, 0.0f, true, 64.0f );
+
 // Diagnostic knob, default off: hardening mid-settle freezes whatever pose the spawn
 // transient left (live trials: 30 ticks @ 8 Hz made LVS tank tilt WORSE, 6/6 vs 7/12
 // baseline). The actual fix for transient-captured contraptions is the gentler
@@ -56,6 +70,19 @@ static ConVar vjolt_length_spring_frequency( "vjolt_length_spring_frequency", "0
 	"(stock behavior)." );
 static ConVar vjolt_length_spring_damping( "vjolt_length_spring_damping", "1.0", FCVAR_NONE,
 	"Steady-state spring damping ratio of length-constraint limits after warmup." );
+
+// Contact depenetration needs to remain gentle for newly spawned multi-body contraptions, but
+// vjolt_baumgarte_factor is also Jolt's correction rate for authored joints. With the production
+// 0.01 factor, a sleeping hard rope can retain several Source units of drive-induced error. Raise
+// only the affected island's position iterations until the rope is back inside its authored limit.
+static ConVar vjolt_hard_distance_recovery_tolerance( "vjolt_hard_distance_recovery_tolerance", "1", FCVAR_NONE,
+	"Hard distance-constraint error (Source units) that activates a temporary per-island position "
+	"solver override. 0 disables recovery.",
+	true, 0.0f, true, 64.0f );
+static ConVar vjolt_hard_distance_recovery_position_steps( "vjolt_hard_distance_recovery_position_steps", "20", FCVAR_NONE,
+	"Position iterations used while a hard distance constraint is outside its authored limit. "
+	"The override is removed as soon as the constraint recovers. 0 disables recovery.",
+	true, 0.0f, true, 64.0f );
 
 static constexpr float UNBREAKABLE_BREAK_LIMIT = 1e12f;
 
@@ -138,6 +165,8 @@ JoltPhysicsConstraint::JoltPhysicsConstraint( JoltPhysicsEnvironment *pPhysicsEn
 {
 	m_pObjReference->AddDestroyedListener( this );
 	m_pObjAttached->AddDestroyedListener( this );
+	m_pObjReference->AddConstraint( this );
+	m_pObjAttached->AddConstraint( this );
 	m_pPhysicsEnvironment->RegisterConstraint( this );
 }
 
@@ -472,6 +501,8 @@ void JoltPhysicsConstraint::InitialiseRagdoll( IPhysicsConstraintGroup *pGroup, 
 		// Pyramid keeps the Y/Z swing limits independent per axis, matching the
 		// ragdoll parameter layout (cone would couple them).
 		settings->mSwingType = JPH::ESwingType::Pyramid;
+		bool bFreeSpinAxis = false;
+		uint8 nTinySwingAxisMask = 0;
 
 		for ( int i = 0; i < 3; i++ )
 		{
@@ -509,10 +540,14 @@ void JoltPhysicsConstraint::InitialiseRagdoll( IPhysicsConstraintGroup *pGroup, 
 					Max( flCenter - flHalfRange, -JPH::JPH_PI ),
 					Min( flCenter + flHalfRange, JPH::JPH_PI ) );
 				settings->mMaxFriction[ eAxis ] = Max( settings->mMaxFriction[ eAxis ], flMinTorqueFriction );
+				if ( i > 0 )
+					nTinySwingAxisMask |= 1u << i;
 			}
 			else if ( flRange >= DEG2RAD( 359.0f ) )
 			{
 				settings->MakeFreeAxis( eAxis );
+				if ( i == 0 )
+					bFreeSpinAxis = true;
 			}
 			else
 			{
@@ -523,6 +558,20 @@ void JoltPhysicsConstraint::InitialiseRagdoll( IPhysicsConstraintGroup *pGroup, 
 					Max( flMin, -flCap ),
 					Min( flMax, flCap ) );
 			}
+		}
+
+		constexpr uint8 nBothSwingAxes = ( 1u << 1 ) | ( 1u << 2 );
+		const bool bCanonicalWheelConstraint = bFreeSpinAxis && nTinySwingAxisMask == nBothSwingAxes;
+		if ( bCanonicalWheelConstraint )
+		{
+			// Two global position iterations are not consistently enough for the
+			// coupled wheel/socket/suspension graph. When that island fails to
+			// converge, the Lua state is already correct (unlocked, restored mass,
+			// grounded) but the wheel either spins without translating the chassis
+			// or remains bound. Put the override on the narrowly identified wheel
+			// socket; Jolt propagates the maximum to its connected island.
+			const uint nPositionSteps = static_cast< uint >( vjolt_onlyrot_tiny_axis_position_steps.GetInt() );
+			settings->mNumPositionStepsOverride = Max( settings->mNumPositionStepsOverride, nPositionSteps );
 		}
 
 		pConstraint = settings->Create( *pRefBody, *pAttBody );
@@ -539,6 +588,12 @@ void JoltPhysicsConstraint::InitialiseRagdoll( IPhysicsConstraintGroup *pGroup, 
 		{
 			m_pRotOnlySettings = settings;
 			m_nRotOnlyRecaptureTicks = nRecaptureTicks;
+
+			// Remember the characteristic wheel layout here. LVS initially pins
+			// both bodies and enables the wheel one tick later, so body ordering
+			// can only be classified reliably when the deferred recapture runs.
+			if ( bCanonicalWheelConstraint )
+				m_nRotOnlyTinySwingAxisMask = nTinySwingAxisMask;
 		}
 	}
 	else if ( uDOFCount == 0 )
@@ -907,7 +962,138 @@ void JoltPhysicsConstraint::PostSimulate()
 {
 	RecaptureRotOnlyFrames();
 	HardenLengthSpring();
+	UpdateHardDistanceRecovery();
 	CheckBroken();
+}
+
+bool JoltPhysicsConstraint::HasHardDistanceErrorGreaterThan( float flTolerance ) const
+{
+	if ( !m_pConstraint || !m_pConstraint->GetEnabled()
+		|| m_pConstraint->GetSubType() != JPH::EConstraintSubType::Distance )
+		return false;
+
+	const JPH::DistanceConstraint *pDistance =
+		static_cast< const JPH::DistanceConstraint * >( m_pConstraint.GetPtr() );
+	if ( pDistance->GetLimitsSpringSettings().HasStiffness() )
+		return false;
+
+	const JPH::Body *pBody1 = pDistance->GetBody1();
+	const JPH::Body *pBody2 = pDistance->GetBody2();
+	if ( !pBody1 || !pBody2 )
+		return false;
+
+	const JPH::Vec3 vLocal1 = pDistance->GetConstraintToBody1Matrix().GetTranslation();
+	const JPH::Vec3 vLocal2 = pDistance->GetConstraintToBody2Matrix().GetTranslation();
+	const JPH::RVec3 vWorld1 = pBody1->GetCenterOfMassPosition() + pBody1->GetRotation() * vLocal1;
+	const JPH::RVec3 vWorld2 = pBody2->GetCenterOfMassPosition() + pBody2->GetRotation() * vLocal2;
+	const float flDistance = JPH::Vec3( vWorld2 - vWorld1 ).Length();
+
+	return flDistance < pDistance->GetMinDistance() - flTolerance
+		|| flDistance > pDistance->GetMaxDistance() + flTolerance;
+}
+
+void JoltPhysicsConstraint::RequestSolverBoost( const JoltPhysicsObject *pRequester, uint nVelocitySteps, uint nPositionSteps )
+{
+	if ( !m_pConstraint || !pRequester )
+		return;
+
+	SolverBoostRequest *pRequest = nullptr;
+	for ( SolverBoostRequest &request : m_SolverBoostRequests )
+	{
+		if ( request.m_pRequester == pRequester )
+		{
+			pRequest = &request;
+			break;
+		}
+	}
+
+	if ( !pRequest )
+	{
+		SaveSolverBoostBase();
+		m_SolverBoostRequests.emplace_back();
+		pRequest = &m_SolverBoostRequests.back();
+		pRequest->m_pRequester = pRequester;
+	}
+
+	pRequest->m_nVelocitySteps = static_cast< uint8 >( Min( nVelocitySteps, 255u ) );
+	pRequest->m_nPositionSteps = static_cast< uint8 >( Min( nPositionSteps, 255u ) );
+	ApplySolverBoostRequests();
+}
+
+void JoltPhysicsConstraint::ReleaseSolverBoost( const JoltPhysicsObject *pRequester )
+{
+	for ( auto it = m_SolverBoostRequests.begin(); it != m_SolverBoostRequests.end(); ++it )
+	{
+		if ( it->m_pRequester != pRequester )
+			continue;
+
+		m_SolverBoostRequests.erase( it );
+		ApplySolverBoostRequests();
+		return;
+	}
+}
+
+void JoltPhysicsConstraint::ApplySolverBoostRequests()
+{
+	if ( !m_pConstraint || !m_bSolverBoostBaseSaved )
+		return;
+
+	uint nVelocitySteps = m_nSavedVelocityStepsOverride;
+	uint nPositionSteps = m_nSavedPositionStepsOverride;
+	for ( const SolverBoostRequest &request : m_SolverBoostRequests )
+	{
+		nVelocitySteps = Max( nVelocitySteps, static_cast< uint >( request.m_nVelocitySteps ) );
+		nPositionSteps = Max( nPositionSteps, static_cast< uint >( request.m_nPositionSteps ) );
+	}
+	if ( m_bHardDistanceRecoveryActive )
+	{
+		nPositionSteps = Max( nPositionSteps,
+			static_cast< uint >( vjolt_hard_distance_recovery_position_steps.GetInt() ) );
+	}
+
+	m_pConstraint->SetNumVelocityStepsOverride( nVelocitySteps );
+	m_pConstraint->SetNumPositionStepsOverride( nPositionSteps );
+
+	if ( m_SolverBoostRequests.empty() && !m_bHardDistanceRecoveryActive )
+		m_bSolverBoostBaseSaved = false;
+}
+
+void JoltPhysicsConstraint::SaveSolverBoostBase()
+{
+	if ( !m_pConstraint || m_bSolverBoostBaseSaved )
+		return;
+
+	m_nSavedVelocityStepsOverride = static_cast< uint8 >( m_pConstraint->GetNumVelocityStepsOverride() );
+	m_nSavedPositionStepsOverride = static_cast< uint8 >( m_pConstraint->GetNumPositionStepsOverride() );
+	m_bSolverBoostBaseSaved = true;
+}
+
+void JoltPhysicsConstraint::UpdateHardDistanceRecovery()
+{
+	const float flToleranceSource = vjolt_hard_distance_recovery_tolerance.GetFloat();
+	const int nPositionSteps = vjolt_hard_distance_recovery_position_steps.GetInt();
+	const bool bNeedsRecovery = flToleranceSource > 0.0f && nPositionSteps > 0
+		&& HasHardDistanceErrorGreaterThan( SourceToJolt::Distance( flToleranceSource ) );
+
+	if ( bNeedsRecovery != m_bHardDistanceRecoveryActive )
+	{
+		if ( bNeedsRecovery )
+			SaveSolverBoostBase();
+
+		m_bHardDistanceRecoveryActive = bNeedsRecovery;
+		ApplySolverBoostRequests();
+	}
+
+	if ( !m_bHardDistanceRecoveryActive )
+		return;
+
+	// An out-of-tolerance island may already have gone to sleep, in which case a
+	// higher iteration count alone is inert. Keep only its dynamic endpoints awake
+	// until the authored hard limit is satisfied again.
+	if ( m_pObjReference && m_pObjReference->IsMoveable() )
+		m_pObjReference->Wake();
+	if ( m_pObjAttached && m_pObjAttached->IsMoveable() )
+		m_pObjAttached->Wake();
 }
 
 void JoltPhysicsConstraint::HardenLengthSpring()
@@ -952,10 +1138,53 @@ void JoltPhysicsConstraint::RecaptureRotOnlyFrames()
 	settings->mAxisX1 = qRefToAtt * settings->mAxisX2;
 	settings->mAxisY1 = qRefToAtt * settings->mAxisY2;
 
+	const float flMotorFrequency = vjolt_onlyrot_tiny_axis_motor_frequency.GetFloat();
+	const float flMotorDamping = vjolt_onlyrot_tiny_axis_motor_damping.GetFloat();
+	// LVS mirrors each socket in both body orders. Select only the now-dynamic
+	// wheel -> still-static master half so one side actively follows the target
+	// while the reverse mirror remains a passive limit.
+	const bool bEnableTinyAxisMotor = m_nRotOnlyTinySwingAxisMask != 0
+		&& pRefBody->GetMotionType() == JPH::EMotionType::Dynamic
+		&& pAttBody->GetMotionType() == JPH::EMotionType::Static
+		&& std::isfinite( flMotorFrequency ) && flMotorFrequency > 0.0f
+		&& std::isfinite( flMotorDamping ) && flMotorDamping >= 0.0f;
+	if ( bEnableTinyAxisMotor )
+	{
+		for ( int i = 0; i < 3; ++i )
+		{
+			if ( ( m_nRotOnlyTinySwingAxisMask & ( 1u << i ) ) == 0 )
+				continue;
+
+			const JPH::SixDOFConstraintSettings::EAxis eAxis =
+				static_cast< JPH::SixDOFConstraintSettings::EAxis >( JPH::SixDOFConstraintSettings::EAxis::RotationX + i );
+			settings->mMotorSettings[ eAxis ] = JPH::MotorSettings( flMotorFrequency, flMotorDamping );
+		}
+	}
+
 	const bool bEnabled = m_pConstraint->GetEnabled();
 	m_pPhysicsSystem->RemoveConstraint( m_pConstraint );
 	m_pConstraint = settings->Create( *pRefBody, *pAttBody );
 	m_pConstraint->SetEnabled( bEnabled );
+	// Creating from settings already restores the constraint's configured base
+	// overrides. Only layer the transient boost state back on when a requester is
+	// actually active; applying an empty request set here would replace that base
+	// with the zero-initialized saved values.
+	if ( m_bSolverBoostBaseSaved )
+		ApplySolverBoostRequests();
+	if ( bEnableTinyAxisMotor )
+	{
+		JPH::SixDOFConstraint *pSixDOF = static_cast< JPH::SixDOFConstraint * >( m_pConstraint.GetPtr() );
+		pSixDOF->SetTargetOrientationCS( JPH::Quat::sIdentity() );
+		for ( int i = 0; i < 3; ++i )
+		{
+			if ( ( m_nRotOnlyTinySwingAxisMask & ( 1u << i ) ) == 0 )
+				continue;
+
+			const JPH::SixDOFConstraint::EAxis eAxis = static_cast< JPH::SixDOFConstraint::EAxis >(
+				JPH::SixDOFConstraint::EAxis::RotationX + i );
+			pSixDOF->SetMotorState( eAxis, JPH::EMotorState::Position );
+		}
+	}
 	m_pPhysicsSystem->AddConstraint( m_pConstraint );
 }
 
@@ -1030,16 +1259,24 @@ void JoltPhysicsConstraint::DestroyConstraint()
 	if ( m_pObjAttached )
 	{
 		m_pObjAttached->RemoveDestroyedListener( this );
+		m_pObjAttached->RemoveConstraint( this );
 		m_pObjAttached = nullptr;
 	}
 	if ( m_pObjReference )
 	{
 		m_pObjReference->RemoveDestroyedListener( this );
+		m_pObjReference->RemoveConstraint( this );
 		m_pObjReference = nullptr;
 	}
 
 	m_pRotOnlySettings = nullptr;
 	m_nRotOnlyRecaptureTicks = 0;
+	m_nRotOnlyTinySwingAxisMask = 0;
+	m_SolverBoostRequests.clear();
+	m_bSolverBoostBaseSaved = false;
+	m_bHardDistanceRecoveryActive = false;
+	m_nSavedVelocityStepsOverride = 0;
+	m_nSavedPositionStepsOverride = 0;
 	m_nLengthSpringWarmupTicks = 0;
 
 	if ( m_pConstraint )

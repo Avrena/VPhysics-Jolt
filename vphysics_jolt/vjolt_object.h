@@ -13,6 +13,7 @@ class JoltPhysicsShadowController;
 class JoltPhysicsFluidController;
 class JoltPhysicsEnvironment;
 class JoltPhysicsObject;
+class JoltPhysicsConstraint;
 class IPhysicsEnvironment;
 
 #if defined( GAME_CSGO_OR_NEWER )
@@ -182,6 +183,8 @@ public:
 
 	void AddDestroyedListener( IJoltObjectDestroyedListener *pListener );
 	void RemoveDestroyedListener( IJoltObjectDestroyedListener *pListener );
+	void AddConstraint( JoltPhysicsConstraint *pConstraint );
+	void RemoveConstraint( JoltPhysicsConstraint *pConstraint );
 
 	// Grabs the position, adds addPos and teleports the object
 	void AddToPosition( JPH::Vec3Arg addPos );
@@ -283,6 +286,10 @@ public:
 	void RecaulculateFixedConstraintPartnerMovable();
 private:
 	void UpdateMaterialProperties();
+	void WakeConstrainedDynamicPartners();
+	void RequestShadowConstraintSolverBoost();
+	void UpdateShadowConstraintSolverBoost();
+	void RestoreShadowConstraintSolverBoost();
 
 	// Josh:
 	// Always put m_pGameData first. Some games that will
@@ -337,6 +344,13 @@ private:
 	Vector m_vPlayerDrivenVelocity = vec3_origin;
 
 	CUtlVector< IJoltObjectDestroyedListener * > m_destroyedListeners;
+	std::vector< JoltPhysicsConstraint * > m_pConstraints;
+
+	// ComputeShadowControl writes a held body's target velocity before Jolt solves
+	// the connected island. Complex assemblies need a temporary iteration boost
+	// to keep hard joints from accumulating a large pose error during fast turns.
+	bool m_bShadowConstraintSolverBoosted = false;
+	bool m_bShadowConstraintDrivenThisStep = false;
 
 public:
 	// Per-other-body contact data accumulated during the last simulation step.
