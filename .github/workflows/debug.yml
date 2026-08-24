@@ -92,3 +92,6 @@ jobs:
       no-checkout: "true"
       branch: ${{ matrix.branch }}
       timeout: "4"
+    secrets:
+      # Register private CI identifiers with Actions redaction before SRCDS starts.
+      secret-additional-setup: ${{ secrets.GLUATEST_LOG_MASK_SETUP }}
