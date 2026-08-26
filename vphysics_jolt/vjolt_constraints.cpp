@@ -136,8 +136,7 @@ uint JoltPhysicsConstraintGroup::GetSolverIterations() const
 {
 	// IVP constructs a local constraint system with two base iterations plus the
 	// caller-requested additional iterations. Jolt splits solving into velocity
-	// and position phases, so use that total as a floor for both. The island takes
-	// the maximum of these overrides and the global defaults.
+	// and position phases, so use that total as the group floor for both.
 	return static_cast< uint >( Clamp( m_ErrorParams.additionalIterations, 0, 253 ) + 2 );
 }
 
@@ -940,10 +939,23 @@ void JoltPhysicsConstraint::ApplyGroupSolverIterations( uint nSolverIterations )
 		return;
 
 	const uint nClampedIterations = Min( nSolverIterations, 255u );
+	const JPH::PhysicsSettings &settings = m_pPhysicsSystem->GetPhysicsSettings();
+
+	// A non-zero Jolt override suppresses the global default when an island has no
+	// contacts (and therefore no zero-override motion properties to request it).
+	// Store the phase-specific maximum explicitly so a grouped, airborne assembly
+	// cannot lose velocity iterations simply because every constraint has an
+	// override. RefreshGroupSolverIterations keeps runtime cvar changes coherent.
 	m_pConstraint->SetNumVelocityStepsOverride(
-		Max( m_pConstraint->GetNumVelocityStepsOverride(), nClampedIterations ) );
+		Max( nClampedIterations, settings.mNumVelocitySteps ) );
 	m_pConstraint->SetNumPositionStepsOverride(
-		Max( m_pConstraint->GetNumPositionStepsOverride(), nClampedIterations ) );
+		Max( nClampedIterations, settings.mNumPositionSteps ) );
+}
+
+void JoltPhysicsConstraint::RefreshGroupSolverIterations()
+{
+	if ( m_pGroup )
+		m_pGroup->ApplySolverIterations( this );
 }
 
 void JoltPhysicsConstraint::HardenLengthSpring()

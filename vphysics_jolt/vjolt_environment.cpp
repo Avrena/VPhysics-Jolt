@@ -871,6 +871,8 @@ void JoltPhysicsEnvironment::Simulate( float deltaTime )
 
 	{
 		JPH::PhysicsSettings settings = m_PhysicsSystem.GetPhysicsSettings();
+		const uint nPreviousVelocitySteps = settings.mNumVelocitySteps;
+		const uint nPreviousPositionSteps = settings.mNumPositionSteps;
 		settings.mBaumgarte = vjolt_baumgarte_factor.GetFloat(); // 0.2 def
 		settings.mNumVelocitySteps = vjolt_velocity_steps.GetInt();
 		settings.mNumPositionSteps = vjolt_position_steps.GetInt();
@@ -879,6 +881,13 @@ void JoltPhysicsEnvironment::Simulate( float deltaTime )
 		settings.mLinearCastMaxPenetration = 0.25f;
 		settings.mPenetrationSlop = SourceToJolt::Distance( vjolt_penetration_slop.GetFloat() );
 		m_PhysicsSystem.SetPhysicsSettings( settings );
+
+		if ( settings.mNumVelocitySteps != nPreviousVelocitySteps
+			|| settings.mNumPositionSteps != nPreviousPositionSteps )
+		{
+			for ( JoltPhysicsConstraint *pConstraint : m_pConstraints )
+				pConstraint->RefreshGroupSolverIterations();
+		}
 	}
 
 	// Grab our shared assets from the interface

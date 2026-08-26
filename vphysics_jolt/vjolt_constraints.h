@@ -92,6 +92,7 @@ public:
 	// Apply the owning VPhysics constraint system's iteration count to Jolt's
 	// island-level solver overrides.
 	void ApplyGroupSolverIterations( uint nSolverIterations );
+	void RefreshGroupSolverIterations();
 
 	bool CheckBroken();
 
