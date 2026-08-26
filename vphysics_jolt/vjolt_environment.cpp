@@ -776,7 +776,7 @@ void JoltPhysicsEnvironment::DestroyConstraint( IPhysicsConstraint *pConstraint 
 
 IPhysicsConstraintGroup *JoltPhysicsEnvironment::CreateConstraintGroup( const constraint_groupparams_t &groupParams )
 {
-	return new JoltPhysicsConstraintGroup;
+	return new JoltPhysicsConstraintGroup( groupParams );
 }
 
 void JoltPhysicsEnvironment::DestroyConstraintGroup( IPhysicsConstraintGroup *pGroup )

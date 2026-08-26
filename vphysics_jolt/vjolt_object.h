@@ -287,9 +287,6 @@ public:
 private:
 	void UpdateMaterialProperties();
 	void WakeConstrainedDynamicPartners();
-	void RequestShadowConstraintSolverBoost();
-	void UpdateShadowConstraintSolverBoost();
-	void RestoreShadowConstraintSolverBoost();
 
 	// Josh:
 	// Always put m_pGameData first. Some games that will
@@ -345,12 +342,6 @@ private:
 
 	CUtlVector< IJoltObjectDestroyedListener * > m_destroyedListeners;
 	std::vector< JoltPhysicsConstraint * > m_pConstraints;
-
-	// ComputeShadowControl writes a held body's target velocity before Jolt solves
-	// the connected island. Complex assemblies need a temporary iteration boost
-	// to keep hard joints from accumulating a large pose error during fast turns.
-	bool m_bShadowConstraintSolverBoosted = false;
-	bool m_bShadowConstraintDrivenThisStep = false;
 
 public:
 	// Per-other-body contact data accumulated during the last simulation step.

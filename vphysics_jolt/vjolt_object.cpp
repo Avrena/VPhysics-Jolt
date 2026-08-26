@@ -27,20 +27,6 @@
 
 static ConVar vjolt_object_debug( "vjolt_object_debug", "0", FCVAR_NONE, "Log direct velocity/force API calls on physics objects." );
 
-static ConVar vjolt_shadow_constraint_boost_angular_speed( "vjolt_shadow_constraint_boost_angular_speed", "180", FCVAR_NONE,
-	"Angular speed (degrees/s) at which ComputeShadowControl temporarily raises solver iterations "
-	"for a constrained body's island. 0 disables the boost.",
-	true, 0.0f, true, 2000.0f );
-static ConVar vjolt_shadow_constraint_velocity_steps( "vjolt_shadow_constraint_velocity_steps", "20", FCVAR_NONE,
-	"Velocity iterations used by a rapidly shadow-driven constrained island until its hard distance joints recover.",
-	true, 0.0f, true, 64.0f );
-static ConVar vjolt_shadow_constraint_position_steps( "vjolt_shadow_constraint_position_steps", "8", FCVAR_NONE,
-	"Position iterations used by a rapidly shadow-driven constrained island until its hard distance joints recover.",
-	true, 0.0f, true, 64.0f );
-static ConVar vjolt_shadow_constraint_error_tolerance( "vjolt_shadow_constraint_error_tolerance", "1", FCVAR_NONE,
-	"Hard-distance error (Source units) below which a temporary shadow constraint solver boost is retired.",
-	true, 0.0f, true, 16.0f );
-
 //-------------------------------------------------------------------------------------------------
 
 #if GAME_GMOD
@@ -1305,13 +1291,6 @@ float JoltPhysicsObject::ComputeShadowControl( const hlshadowcontrol_params_t &p
 	float flNewSecondsToArrival =
 		ComputeShadowController( joltParams, scratchPosition, scratchRotation, scratchLinearVelocity, scratchAngularVelocity, flSecondsToArrival, flDeltaTime );
 
-	const float flBoostAngularSpeed = SourceToJolt::Angle( vjolt_shadow_constraint_boost_angular_speed.GetFloat() );
-	if ( !m_pConstraints.empty() && flBoostAngularSpeed > 0.0f
-		&& scratchAngularVelocity.LengthSq() >= Square( flBoostAngularSpeed ) )
-	{
-		RequestShadowConstraintSolverBoost();
-	}
-
 	// IVP's shadow controller writes into pCore->speed which then participates in
 	// IVP's run-to-convergence contact resolution, implicitly clamping the velocity
 	// at any contact. Jolt's fixed-iteration solver can't fully clamp a hard-set
@@ -1613,24 +1592,11 @@ void JoltPhysicsObject::RemoveDestroyedListener( IJoltObjectDestroyedListener *p
 void JoltPhysicsObject::AddConstraint( JoltPhysicsConstraint *pConstraint )
 {
 	if ( !VectorContains( m_pConstraints, pConstraint ) )
-	{
 		m_pConstraints.push_back( pConstraint );
-
-		if ( m_bShadowConstraintSolverBoosted )
-		{
-			pConstraint->RequestSolverBoost(
-				this,
-				static_cast< uint >( vjolt_shadow_constraint_velocity_steps.GetInt() ),
-				static_cast< uint >( vjolt_shadow_constraint_position_steps.GetInt() ) );
-		}
-	}
 }
 
 void JoltPhysicsObject::RemoveConstraint( JoltPhysicsConstraint *pConstraint )
 {
-	if ( m_bShadowConstraintSolverBoosted )
-		pConstraint->ReleaseSolverBoost( this );
-
 	Erase( m_pConstraints, pConstraint );
 }
 
@@ -1796,8 +1762,6 @@ void JoltPhysicsObject::RestoreObjectState( JPH::StateRecorder &recorder )
 
 void JoltPhysicsObject::PostSimulation( float flTimestep )
 {
-	UpdateShadowConstraintSolverBoost();
-
 	Vector vCurrentPos, vCurrentVel;
 	AngularImpulse vAngularImpulse;
 	QAngle qCurrentOrientation;
@@ -1814,52 +1778,6 @@ void JoltPhysicsObject::PostSimulation( float flTimestep )
 	m_vLastAngularVelocity = JoltToSource::Unitless( m_pBody->GetWorldTransform().Multiply3x3Transposed( SourceToJolt::Unitless( vGlobalAngleVelocity ) ) );
 
 	m_qLastOrientation = qCurrentOrientation;
-}
-
-void JoltPhysicsObject::RequestShadowConstraintSolverBoost()
-{
-	const uint nVelocitySteps = static_cast< uint >( vjolt_shadow_constraint_velocity_steps.GetInt() );
-	const uint nPositionSteps = static_cast< uint >( vjolt_shadow_constraint_position_steps.GetInt() );
-	if ( nVelocitySteps == 0 && nPositionSteps == 0 )
-		return;
-
-	for ( JoltPhysicsConstraint *pConstraint : m_pConstraints )
-		pConstraint->RequestSolverBoost( this, nVelocitySteps, nPositionSteps );
-
-	m_bShadowConstraintSolverBoosted = true;
-	m_bShadowConstraintDrivenThisStep = true;
-}
-
-void JoltPhysicsObject::UpdateShadowConstraintSolverBoost()
-{
-	if ( !m_bShadowConstraintSolverBoosted )
-		return;
-
-	const bool bDrivenThisStep = m_bShadowConstraintDrivenThisStep;
-	m_bShadowConstraintDrivenThisStep = false;
-	if ( bDrivenThisStep )
-		return;
-
-	const float flTolerance = SourceToJolt::Distance( vjolt_shadow_constraint_error_tolerance.GetFloat() );
-	for ( JoltPhysicsConstraint *pConstraint : m_pConstraints )
-	{
-		if ( pConstraint && pConstraint->HasHardDistanceErrorGreaterThan( flTolerance ) )
-			return;
-	}
-
-	RestoreShadowConstraintSolverBoost();
-}
-
-void JoltPhysicsObject::RestoreShadowConstraintSolverBoost()
-{
-	if ( !m_bShadowConstraintSolverBoosted )
-		return;
-
-	for ( JoltPhysicsConstraint *pConstraint : m_pConstraints )
-		pConstraint->ReleaseSolverBoost( this );
-
-	m_bShadowConstraintSolverBoosted = false;
-	m_bShadowConstraintDrivenThisStep = false;
 }
 
 //-------------------------------------------------------------------------------------------------

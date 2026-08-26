@@ -26,7 +26,7 @@ class JoltPhysicsEnvironment;
 class JoltPhysicsConstraintGroup final : public IPhysicsConstraintGroup
 {
 public:
-	JoltPhysicsConstraintGroup();
+	explicit JoltPhysicsConstraintGroup( const constraint_groupparams_t &params );
 	~JoltPhysicsConstraintGroup() override;
 
 	void Activate() override;
@@ -38,8 +38,11 @@ public:
 
 	void AddConstraint( JoltPhysicsConstraint *pConstraint );
 	void RemoveConstraint( JoltPhysicsConstraint *pConstraint );
+	void ApplySolverIterations( JoltPhysicsConstraint *pConstraint ) const;
 
 private:
+	uint GetSolverIterations() const;
+
 	std::vector< JoltPhysicsConstraint * >	m_pConstraints;
 	constraint_groupparams_t				m_ErrorParams = {};
 };
@@ -86,17 +89,9 @@ public:
 	// Once per environment simulate step, after the Jolt update.
 	void PostSimulate();
 
-	// Shadow-driven constrained assemblies need extra solver work only while a
-	// hard distance joint is actually displaced. The owning object uses this to
-	// retire its temporary per-island solver override as soon as the assembly is
-	// back inside the authored rope limits.
-	bool HasHardDistanceErrorGreaterThan( float flTolerance ) const;
-
-	// Jolt only considers a body's solver-step override when that body owns a
-	// contact. Constraint overrides are always included in the island's step
-	// calculation, which makes them the reliable owner for suspended assemblies.
-	void RequestSolverBoost( const JoltPhysicsObject *pRequester, uint nVelocitySteps, uint nPositionSteps );
-	void ReleaseSolverBoost( const JoltPhysicsObject *pRequester );
+	// Apply the owning VPhysics constraint system's iteration count to Jolt's
+	// island-level solver overrides.
+	void ApplyGroupSolverIterations( uint nSolverIterations );
 
 	bool CheckBroken();
 
@@ -104,22 +99,12 @@ private:
 
 	void RecaptureRotOnlyFrames();
 	void HardenLengthSpring();
-	void UpdateHardDistanceRecovery();
 
 	void SetGroup( IPhysicsConstraintGroup *pGroup );
 
 	void DestroyConstraint();
 
 	void SetBreakableParams( const constraint_breakableparams_t &params );
-	void SaveSolverBoostBase();
-	void ApplySolverBoostRequests();
-
-	struct SolverBoostRequest
-	{
-		const JoltPhysicsObject *m_pRequester = nullptr;
-		uint8 m_nVelocitySteps = 0;
-		uint8 m_nPositionSteps = 0;
-	};
 
 	JoltPhysicsObject			*m_pObjReference = nullptr;
 	JoltPhysicsObject			*m_pObjAttached = nullptr;
@@ -130,13 +115,6 @@ private:
 	// one-shot frame re-capture N steps after creation (see vjolt_onlyrot_recapture_ticks).
 	JPH::Ref< JPH::SixDOFConstraintSettings >	m_pRotOnlySettings;
 	int							m_nRotOnlyRecaptureTicks = 0;
-	uint8						m_nRotOnlyTinySwingAxisMask = 0;
-
-	std::vector< SolverBoostRequest >	m_SolverBoostRequests;
-	bool						m_bSolverBoostBaseSaved = false;
-	bool						m_bHardDistanceRecoveryActive = false;
-	uint8						m_nSavedVelocityStepsOverride = 0;
-	uint8						m_nSavedPositionStepsOverride = 0;
 
 	// Length (rope) constraints: countdown until the soft warmup limits harden
 	// (see vjolt_length_spring_warmup_ticks).
