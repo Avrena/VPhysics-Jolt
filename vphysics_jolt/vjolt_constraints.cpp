@@ -162,6 +162,7 @@ JoltPhysicsConstraint::JoltPhysicsConstraint( JoltPhysicsEnvironment *pPhysicsEn
 	m_pObjReference->AddConstraint( this );
 	m_pObjAttached->AddConstraint( this );
 	m_pPhysicsEnvironment->RegisterConstraint( this );
+	ApplyConstraintStrength();
 }
 
 JoltPhysicsConstraint::~JoltPhysicsConstraint()
@@ -340,7 +341,7 @@ bool JoltPhysicsConstraint::GetConstraintParams( constraint_breakableparams_t *p
 	pParams->torqueLimit = m_SourceTorqueLimit;
 	pParams->bodyMassScale[0] = m_BodyMassScale[0];
 	pParams->bodyMassScale[1] = m_BodyMassScale[1];
-	pParams->strength = m_BreakStrength;
+	pParams->strength = m_ConstraintStrength;
 	pParams->isActive = m_pConstraint ? m_pConstraint->GetEnabled() : false;
 	return true;
 }
@@ -351,7 +352,7 @@ void JoltPhysicsConstraint::SetBreakableParams( const constraint_breakableparams
 {
 	m_SourceForceLimit = params.forceLimit;
 	m_SourceTorqueLimit = params.torqueLimit;
-	m_BreakStrength = params.strength;
+	m_ConstraintStrength = params.strength;
 	m_BodyMassScale[0] = params.bodyMassScale[0];
 	m_BodyMassScale[1] = params.bodyMassScale[1];
 
@@ -615,6 +616,7 @@ void JoltPhysicsConstraint::InitialiseRagdoll( IPhysicsConstraintGroup *pGroup, 
 	const bool bActive = !m_pGroup && ragdoll.constraint.isActive;
 
 	m_pConstraint = pConstraint;
+	ApplyConstraintStrength();
 	m_pConstraint->SetEnabled( bActive );
 	m_pPhysicsSystem->AddConstraint( m_pConstraint );
 }
@@ -653,6 +655,7 @@ void JoltPhysicsConstraint::InitialiseHinge( IPhysicsConstraintGroup *pGroup, co
 	settings.mMaxFrictionTorque = SourceToJolt::Torque( hinge.hingeAxis.torque );
 
 	m_pConstraint = settings.Create( *refBody, *attBody );
+	ApplyConstraintStrength();
 	m_pConstraint->SetEnabled( !pGroup && hinge.constraint.isActive );
 
 	m_pPhysicsSystem->AddConstraint( m_pConstraint );
@@ -685,6 +688,7 @@ void JoltPhysicsConstraint::InitialiseSliding( IPhysicsConstraintGroup *pGroup, 
 	settings.mMaxFrictionForce = sliding.friction;
 
 	m_pConstraint = settings.Create( *refBody, *attBody );
+	ApplyConstraintStrength();
 	m_pConstraint->SetEnabled( !pGroup && sliding.constraint.isActive );
 
 	if ( sliding.velocity )
@@ -719,6 +723,7 @@ void JoltPhysicsConstraint::InitialiseBallsocket( IPhysicsConstraintGroup *pGrou
 	settings.mPoint2 = SourceToJolt::Distance( ballsocket.constraintPosition[1] ) - attBody->GetShape()->GetCenterOfMass();
 
 	m_pConstraint = settings.Create( *refBody, *attBody );
+	ApplyConstraintStrength();
 	m_pConstraint->SetEnabled( !pGroup && ballsocket.constraint.isActive );
 
 	m_pPhysicsSystem->AddConstraint( m_pConstraint );
@@ -744,6 +749,7 @@ void JoltPhysicsConstraint::InitialiseFixed( IPhysicsConstraintGroup *pGroup, co
 	settings.mAutoDetectPoint = true;
 
 	m_pConstraint = settings.Create( *refBody, *attBody );
+	ApplyConstraintStrength();
 	m_pConstraint->SetEnabled( !pGroup && fixed.constraint.isActive );
 
 	m_pPhysicsSystem->AddConstraint( m_pConstraint );
@@ -799,6 +805,7 @@ void JoltPhysicsConstraint::InitialiseLength( IPhysicsConstraintGroup *pGroup, c
 	}
 
 	m_pConstraint = settings.Create( *refBody, *attBody );
+	ApplyConstraintStrength();
 	m_pConstraint->SetEnabled( !pGroup && length.constraint.isActive );
 
 	m_pPhysicsSystem->AddConstraint( m_pConstraint );
@@ -833,6 +840,7 @@ void JoltPhysicsConstraint::InitialisePulley( IPhysicsConstraintGroup *pGroup, c
 	settings.mMaxLength = SourceToJolt::Distance( pulley.totalLength ); // PiMoN: from my testing, it is the same value as Jolt would calculate automatically
 
 	m_pConstraint = settings.Create( *refBody, *attBody );
+	ApplyConstraintStrength();
 	m_pConstraint->SetEnabled( !pGroup && pulley.constraint.isActive );
 
 	m_pPhysicsSystem->AddConstraint( m_pConstraint );
@@ -1003,6 +1011,7 @@ void JoltPhysicsConstraint::RecaptureRotOnlyFrames()
 	const bool bEnabled = m_pConstraint->GetEnabled();
 	m_pPhysicsSystem->RemoveConstraint( m_pConstraint );
 	m_pConstraint = settings->Create( *pRefBody, *pAttBody );
+	ApplyConstraintStrength();
 	m_pConstraint->SetEnabled( bEnabled );
 	if ( m_pGroup )
 		m_pGroup->ApplySolverIterations( this );
@@ -1073,6 +1082,24 @@ void JoltPhysicsConstraint::SetGroup( IPhysicsConstraintGroup *pGroup )
 	m_pGroup = static_cast< JoltPhysicsConstraintGroup * >( pGroup );
 	if ( m_pGroup )
 		m_pGroup->AddConstraint( this );
+}
+
+void JoltPhysicsConstraint::ApplyConstraintStrength()
+{
+	if ( !m_pConstraint )
+		return;
+
+	// IVP keeps authored-constraint correction separate from contact
+	// depenetration. Its constraint strength is a 0..1 positional correction
+	// fraction (ragdolls and ballsockets use a hard-coded tau of 1), while
+	// VJolt previously discarded it and solved every joint with the global
+	// contact Baumgarte.
+	const bool bFullStrength = m_ConstraintType == CONSTRAINT_RAGDOLL ||
+		m_ConstraintType == CONSTRAINT_BALLSOCKET;
+	const float flStrength = bFullStrength
+		? 1.0f
+		: Clamp( m_ConstraintStrength, 0.0f, 1.0f );
+	m_pConstraint->SetPositionCorrectionStrength( flStrength );
 }
 
 void JoltPhysicsConstraint::DestroyConstraint()

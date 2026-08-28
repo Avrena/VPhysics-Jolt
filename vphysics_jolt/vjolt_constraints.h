@@ -100,6 +100,7 @@ private:
 
 	void RecaptureRotOnlyFrames();
 	void HardenLengthSpring();
+	void ApplyConstraintStrength();
 
 	void SetGroup( IPhysicsConstraintGroup *pGroup );
 
@@ -131,6 +132,6 @@ private:
 	float						m_AngularBreakImpulse = 0.0f;
 	float						m_SourceForceLimit = 0.0f;
 	float						m_SourceTorqueLimit = 0.0f;
-	float						m_BreakStrength = 1.0f;
+	float						m_ConstraintStrength = 1.0f;
 	float						m_BodyMassScale[2] = { 1.0f, 1.0f };
 };
