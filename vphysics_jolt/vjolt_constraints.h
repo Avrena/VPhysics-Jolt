@@ -100,7 +100,6 @@ private:
 
 	void RecaptureRotOnlyFrames();
 	void HardenLengthSpring();
-	void ApplyConstraintStrength();
 
 	void SetGroup( IPhysicsConstraintGroup *pGroup );
 
