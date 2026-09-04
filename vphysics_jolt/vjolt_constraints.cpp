@@ -804,8 +804,8 @@ void JoltPhysicsConstraint::InitialiseLength( IPhysicsConstraintGroup *pGroup, c
 	}
 
 	// Source's stiff-spring constraint applies authored strength as a velocity
-	// bias (tau * distance error / dt) and damps half of the relative anchor
-	// velocity. It also activates before the next transform crosses a limit.
+	// bias (tau * distance error / dt) and damps half of the setup-time relative
+	// anchor velocity. It also activates before the next transform crosses a limit.
 	// This keeps fast LVS suspension ropes bounded without using contact
 	// Baumgarte or directly teleporting constrained bodies in the position pass.
 	m_pConstraint = settings.Create( *refBody, *attBody );
