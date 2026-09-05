@@ -73,7 +73,8 @@ static JPH::Vec3 HingePerpendicularVector( JPH::Vec3Arg dir )
 
 //-------------------------------------------------------------------------------------------------
 
-JoltPhysicsConstraintGroup::JoltPhysicsConstraintGroup()
+JoltPhysicsConstraintGroup::JoltPhysicsConstraintGroup( const constraint_groupparams_t &params )
+	: m_ErrorParams( params )
 {
 }
 
@@ -86,7 +87,10 @@ JoltPhysicsConstraintGroup::~JoltPhysicsConstraintGroup()
 void JoltPhysicsConstraintGroup::Activate()
 {
 	for ( JoltPhysicsConstraint *pConstraint : m_pConstraints )
+	{
+		ApplySolverIterations( pConstraint );
 		pConstraint->Activate();
+	}
 }
 
 bool JoltPhysicsConstraintGroup::IsInErrorState()
@@ -106,7 +110,10 @@ void JoltPhysicsConstraintGroup::GetErrorParams( constraint_groupparams_t *pPara
 
 void JoltPhysicsConstraintGroup::SetErrorParams( const constraint_groupparams_t &params )
 {
-	m_ErrorParams = params;
+	// IVP's SetErrorParams updates only the error policy. The iteration count is
+	// fixed when the local constraint system is created.
+	m_ErrorParams.minErrorTicks = params.minErrorTicks;
+	m_ErrorParams.errorTolerance = params.errorTolerance;
 }
 
 void JoltPhysicsConstraintGroup::SolvePenetration( IPhysicsObject *pObj0, IPhysicsObject *pObj1 )
@@ -125,6 +132,20 @@ void JoltPhysicsConstraintGroup::RemoveConstraint( JoltPhysicsConstraint *pConst
 	Erase( m_pConstraints, pConstraint );
 }
 
+uint JoltPhysicsConstraintGroup::GetSolverIterations() const
+{
+	// IVP constructs a local constraint system with two base iterations plus the
+	// caller-requested additional iterations. Jolt splits solving into velocity
+	// and position phases, so use that total as the group floor for both.
+	return static_cast< uint >( Clamp( m_ErrorParams.additionalIterations, 0, 253 ) + 2 );
+}
+
+void JoltPhysicsConstraintGroup::ApplySolverIterations( JoltPhysicsConstraint *pConstraint ) const
+{
+	if ( pConstraint )
+		pConstraint->ApplyGroupSolverIterations( GetSolverIterations() );
+}
+
 //-------------------------------------------------------------------------------------------------
 
 JoltPhysicsConstraint::JoltPhysicsConstraint( JoltPhysicsEnvironment *pPhysicsEnvironment, IPhysicsObject *pReferenceObject, IPhysicsObject *pAttachedObject, constraintType_t Type, JPH::Constraint* pConstraint, void *pGameData )
@@ -138,7 +159,14 @@ JoltPhysicsConstraint::JoltPhysicsConstraint( JoltPhysicsEnvironment *pPhysicsEn
 {
 	m_pObjReference->AddDestroyedListener( this );
 	m_pObjAttached->AddDestroyedListener( this );
+	m_pObjReference->AddConstraint( this );
+	m_pObjAttached->AddConstraint( this );
 	m_pPhysicsEnvironment->RegisterConstraint( this );
+
+	// Restored Source length constraints predate this runtime-only Jolt option,
+	// so reapply the stock stiff-spring behavior without changing save formats.
+	if ( m_pConstraint && m_ConstraintType == CONSTRAINT_LENGTH )
+		static_cast< JPH::DistanceConstraint * >( m_pConstraint.GetPtr() )->SetLimitsVelocityBias( 1.0f, 0.5f );
 }
 
 JoltPhysicsConstraint::~JoltPhysicsConstraint()
@@ -317,7 +345,7 @@ bool JoltPhysicsConstraint::GetConstraintParams( constraint_breakableparams_t *p
 	pParams->torqueLimit = m_SourceTorqueLimit;
 	pParams->bodyMassScale[0] = m_BodyMassScale[0];
 	pParams->bodyMassScale[1] = m_BodyMassScale[1];
-	pParams->strength = m_BreakStrength;
+	pParams->strength = m_ConstraintStrength;
 	pParams->isActive = m_pConstraint ? m_pConstraint->GetEnabled() : false;
 	return true;
 }
@@ -328,7 +356,7 @@ void JoltPhysicsConstraint::SetBreakableParams( const constraint_breakableparams
 {
 	m_SourceForceLimit = params.forceLimit;
 	m_SourceTorqueLimit = params.torqueLimit;
-	m_BreakStrength = params.strength;
+	m_ConstraintStrength = params.strength;
 	m_BodyMassScale[0] = params.bodyMassScale[0];
 	m_BodyMassScale[1] = params.bodyMassScale[1];
 
@@ -775,7 +803,14 @@ void JoltPhysicsConstraint::InitialiseLength( IPhysicsConstraintGroup *pGroup, c
 		settings.mLimitsSpringSettings.mDamping = vjolt_length_spring_damping.GetFloat();
 	}
 
+	// Source's stiff-spring constraint applies authored strength as a velocity
+	// bias (tau * distance error / dt) and damps half of the setup-time relative
+	// anchor velocity. It also activates before the next transform crosses a limit.
+	// This keeps fast LVS suspension ropes bounded without using contact
+	// Baumgarte or directly teleporting constrained bodies in the position pass.
 	m_pConstraint = settings.Create( *refBody, *attBody );
+	static_cast< JPH::DistanceConstraint * >( m_pConstraint.GetPtr() )->SetLimitsVelocityBias(
+		Clamp( m_ConstraintStrength, 0.0f, 1.0f ), 0.5f );
 	m_pConstraint->SetEnabled( !pGroup && length.constraint.isActive );
 
 	m_pPhysicsSystem->AddConstraint( m_pConstraint );
@@ -910,6 +945,31 @@ void JoltPhysicsConstraint::PostSimulate()
 	CheckBroken();
 }
 
+void JoltPhysicsConstraint::ApplyGroupSolverIterations( uint nSolverIterations )
+{
+	if ( !m_pConstraint )
+		return;
+
+	const uint nClampedIterations = Min( nSolverIterations, 255u );
+	const JPH::PhysicsSettings &settings = m_pPhysicsSystem->GetPhysicsSettings();
+
+	// A non-zero Jolt override suppresses the global default when an island has no
+	// contacts (and therefore no zero-override motion properties to request it).
+	// Store the phase-specific maximum explicitly so a grouped, airborne assembly
+	// cannot lose velocity iterations simply because every constraint has an
+	// override. RefreshGroupSolverIterations keeps runtime cvar changes coherent.
+	m_pConstraint->SetNumVelocityStepsOverride(
+		Max( nClampedIterations, settings.mNumVelocitySteps ) );
+	m_pConstraint->SetNumPositionStepsOverride(
+		Max( nClampedIterations, settings.mNumPositionSteps ) );
+}
+
+void JoltPhysicsConstraint::RefreshGroupSolverIterations()
+{
+	if ( m_pGroup )
+		m_pGroup->ApplySolverIterations( this );
+}
+
 void JoltPhysicsConstraint::HardenLengthSpring()
 {
 	if ( m_nLengthSpringWarmupTicks <= 0 )
@@ -956,6 +1016,8 @@ void JoltPhysicsConstraint::RecaptureRotOnlyFrames()
 	m_pPhysicsSystem->RemoveConstraint( m_pConstraint );
 	m_pConstraint = settings->Create( *pRefBody, *pAttBody );
 	m_pConstraint->SetEnabled( bEnabled );
+	if ( m_pGroup )
+		m_pGroup->ApplySolverIterations( this );
 	m_pPhysicsSystem->AddConstraint( m_pConstraint );
 }
 
@@ -1030,11 +1092,13 @@ void JoltPhysicsConstraint::DestroyConstraint()
 	if ( m_pObjAttached )
 	{
 		m_pObjAttached->RemoveDestroyedListener( this );
+		m_pObjAttached->RemoveConstraint( this );
 		m_pObjAttached = nullptr;
 	}
 	if ( m_pObjReference )
 	{
 		m_pObjReference->RemoveDestroyedListener( this );
+		m_pObjReference->RemoveConstraint( this );
 		m_pObjReference = nullptr;
 	}
 

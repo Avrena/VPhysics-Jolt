@@ -337,7 +337,7 @@ public:
 		JoltPhysicsObject* pObject = reinterpret_cast<JoltPhysicsObject*>( inBody.GetUserData() );
 
 		// Ignore self if specified. This can be nullptr if you don't want this.
-		if ( pObject == m_pSelfObject )
+		if ( !pObject || pObject == m_pSelfObject )
 			return false;
 
 		if constexpr ( MoveablesOnly )
@@ -356,6 +356,137 @@ private:
 	JPH::PhysicsSystem	*m_pPhysicsSystem;
 	JoltPhysicsObject	*m_pSelfObject;
 };
+
+// Source's player controller limits velocity into contact planes so a player cannot push a
+// static/heavy body, or accelerate a light pushable beyond the configured push speed. The Jolt
+// Character rewrite retained SetPushMassLimit/SetPushSpeedLimit but stopped applying either
+// value. This collector rebuilds the same small, de-duplicated plane set only for the rare step
+// where the contact solver added enough velocity to risk crossing a whole player boundary.
+class PlayerPushNormalCollector final : public JPH::CollideShapeCollector
+{
+public:
+	static constexpr int MAX_NORMALS = 8;
+
+	PlayerPushNormalCollector( JPH::PhysicsSystem *pPhysicsSystem, JoltPhysicsObject *pSelfObject,
+		const Vector &vVelocity, float flMassLimit, float flSpeedLimit )
+		: m_pPhysicsSystem( pPhysicsSystem )
+		, m_pSelfObject( pSelfObject )
+		, m_vVelocity( vVelocity )
+		, m_flMassLimit( flMassLimit )
+		, m_flSpeedLimit( Max( flSpeedLimit, 0.0f ) )
+	{
+	}
+
+	void AddHit( const JPH::CollideShapeResult &inResult ) override
+	{
+		JPH::BodyLockRead lock( m_pPhysicsSystem->GetBodyLockInterfaceNoLock(), inResult.mBodyID2 );
+		if ( !lock.Succeeded() )
+			return;
+
+		const JPH::Body &body = lock.GetBody();
+		JoltPhysicsObject *pObject = reinterpret_cast<JoltPhysicsObject *>( body.GetUserData() );
+		if ( !pObject || pObject == m_pSelfObject || pObject->IsTrigger() )
+			return;
+
+		JPH::Vec3 vJoltNormal = inResult.mPenetrationAxis;
+		if ( vJoltNormal.IsNearZero() )
+			return;
+
+		vJoltNormal = vJoltNormal.Normalized();
+		Vector vNormal( vJoltNormal.GetX(), vJoltNormal.GetY(), vJoltNormal.GetZ() );
+
+		// Match Source's ground exception. The player controller's ground/base-velocity path owns
+		// this plane; treating it as a push blocker would suppress legitimate vertical motion.
+		if ( vNormal.z <= -0.99f )
+			return;
+
+		const float flContactLimit =
+			( !pObject->IsMoveable() || pObject->GetMass() > m_flMassLimit ) ? 0.0f : m_flSpeedLimit;
+		if ( DotProduct( m_vVelocity, vNormal ) <= flContactLimit )
+			return;
+
+		m_flClampSpeed = Min( m_flClampSpeed, flContactLimit );
+
+		for ( int i = 0; i < m_nNormalCount; ++i )
+		{
+			if ( DotProduct( m_vNormals[i], vNormal ) > 0.99f )
+				return;
+		}
+
+		if ( m_nNormalCount < MAX_NORMALS )
+			m_vNormals[m_nNormalCount++] = vNormal;
+	}
+
+	Vector ClampVelocity() const
+	{
+		if ( m_nNormalCount > 2 )
+		{
+			for ( int i = 0; i < m_nNormalCount; ++i )
+			{
+				if ( DotProduct( m_vVelocity, m_vNormals[i] ) > 0.0f )
+					return vec3_origin;
+			}
+		}
+		else if ( m_nNormalCount == 2 )
+		{
+			Vector vCrease;
+			CrossProduct( m_vNormals[0], m_vNormals[1], vCrease );
+			return vCrease * DotProduct( m_vVelocity, vCrease );
+		}
+		else if ( m_nNormalCount == 1 )
+		{
+			const float flProjection = DotProduct( m_vVelocity, m_vNormals[0] );
+			if ( flProjection > m_flClampSpeed )
+				return m_vVelocity + m_vNormals[0] * ( m_flClampSpeed - flProjection );
+		}
+
+		return m_vVelocity;
+	}
+
+private:
+	JPH::PhysicsSystem *m_pPhysicsSystem;
+	JoltPhysicsObject *m_pSelfObject;
+	Vector m_vVelocity;
+	Vector m_vNormals[MAX_NORMALS];
+	float m_flMassLimit;
+	float m_flSpeedLimit;
+	float m_flClampSpeed = FLT_MAX;
+	int m_nNormalCount = 0;
+};
+
+Vector JoltPhysicsPlayerController::ClampPushVelocityAgainstNearbyContacts( const Vector &vVelocity, float flDeltaTime ) const
+{
+	const Vector vDisplacement = vVelocity * flDeltaTime;
+	if ( vDisplacement.LengthSqr() < 1e-6f )
+		return vVelocity;
+
+	JPH::PhysicsSystem *pSystem = m_pObject->GetJoltEnvironment()->GetPhysicsSystem();
+	const JPH::Shape *pShape = m_pCharacter->GetShape();
+	const JPH::Quat qRotation = m_pCharacter->GetRotation();
+	const JPH::RVec3 vPosition = SourceToJolt::Distance( m_vOldPosition );
+	const JPH::RMat44 matCenterOfMass = JPH::RMat44::sRotationTranslation(
+		qRotation, vPosition + qRotation * pShape->GetCenterOfMass() );
+
+	JPH::CollideShapeSettings settings;
+	settings.mActiveEdgeMode = JPH::EActiveEdgeMode::CollideOnlyWithActive;
+	settings.mActiveEdgeMovementDirection = SourceToJolt::Distance( vVelocity );
+	settings.mBackFaceMode = JPH::EBackFaceMode::IgnoreBackFaces;
+	settings.mMaxSeparationDistance =
+		SourceToJolt::Distance( vDisplacement.Length() ) + vjolt_player_character_padding.GetFloat();
+
+	JPH::DefaultBroadPhaseLayerFilter broadPhaseFilter =
+		pSystem->GetDefaultBroadPhaseLayerFilter( GetPlayerObjectLayer() );
+	JPH::DefaultObjectLayerFilter objectLayerFilter =
+		pSystem->GetDefaultLayerFilter( GetPlayerObjectLayer() );
+	SourceHitFilter<false> bodyFilter( pSystem, m_pObject );
+	PlayerPushNormalCollector collector( pSystem, m_pObject, vVelocity,
+		m_flPushableMassLimit, m_flPushableSpeedLimit );
+
+	pSystem->GetNarrowPhaseQueryNoLock().CollideShape( pShape, JPH::Vec3::sOne(),
+		matCenterOfMass, settings, vPosition, collector, broadPhaseFilter, objectLayerFilter, bodyFilter );
+
+	return collector.ClampVelocity();
+}
 
 uint32 JoltPhysicsPlayerController::GetContactState( uint16 nGameFlags )
 {
@@ -437,6 +568,7 @@ int JoltPhysicsPlayerController::TryTeleportObject()
 	// through the m_vLastImpulse-based speed fallback.
 	m_vOldPosition = m_vTargetPosition;
 	m_vLastImpulse = vec3_origin;
+	m_vSimulationVelocity = vec3_origin;
 	return 1;
 }
 
@@ -470,6 +602,7 @@ void JoltPhysicsPlayerController::OnPreSimulate( float flDeltaTime )
 		m_vCurrentSpeed = vec3_origin;
 		m_pObject->SetPlayerDrivenVelocity( vec3_origin );
 		m_vLastImpulse = vec3_origin;
+		m_vSimulationVelocity = vec3_origin;
 		m_bEnable = false; // Wait for a fresh game update before driving again.
 	}
 
@@ -517,6 +650,7 @@ void JoltPhysicsPlayerController::OnPreSimulate( float flDeltaTime )
 
 		m_vOldPosition = vClamped;
 		m_vLastImpulse = vec3_origin;
+		m_vSimulationVelocity = vec3_origin;
 		return;
 	}
 
@@ -614,7 +748,8 @@ void JoltPhysicsPlayerController::OnPreSimulate( float flDeltaTime )
 			}
 		}*/
 
-		m_pCharacter->SetLinearVelocity( SourceToJolt::Distance( vControllerVelocity ) );
+		m_vSimulationVelocity = vControllerVelocity;
+		m_pCharacter->SetLinearVelocity( SourceToJolt::Distance( m_vSimulationVelocity ) );
 	}
 	else
 	{
@@ -630,7 +765,8 @@ void JoltPhysicsPlayerController::OnPreSimulate( float flDeltaTime )
 		Vector vIdleVelocity = ( vOldVelocity - vGroundVelocity ) * Clamp( 1.0f - m_flDampFactor, 0.0f, 1.0f ) + vGroundVelocity;
 		if ( !IsSaneVector( vIdleVelocity, kMaxSaneVelocitySource ) )
 			vIdleVelocity = vec3_origin;
-		m_pCharacter->SetLinearVelocity( SourceToJolt::Distance( vIdleVelocity ) );
+		m_vSimulationVelocity = vIdleVelocity;
+		m_pCharacter->SetLinearVelocity( SourceToJolt::Distance( m_vSimulationVelocity ) );
 	}
 
 	m_vOldPosition = vOldPosition;
@@ -660,11 +796,36 @@ void JoltPhysicsPlayerController::OnPostSimulate( float flDeltaTime )
 		m_vCurrentSpeed = vec3_origin;
 		m_pObject->SetPlayerDrivenVelocity( vec3_origin );
 		m_vLastImpulse = vec3_origin;
+		m_vSimulationVelocity = vec3_origin;
 		m_bEnable = false; // Wait for a fresh game update before driving again.
 		return;
 	}
 
 	Vector vNewVelocity = ( vNewPosition - m_vOldPosition ) / flDeltaTime;
+
+	// The stock player controller caps velocity into nearby contact planes using the limits
+	// supplied through SetPushSpeedLimit/SetPushMassLimit. Jolt contact impulses are applied
+	// after our pre-simulation drive, so constrain only velocity that the solver added beyond
+	// that drive. The expanded old-position query catches thin door seams even when the final
+	// body position has already crossed far enough to have no discrete overlap.
+	const float flNewSpeed = vNewVelocity.Length();
+	if ( flDeltaTime > 0.0f && std::isfinite( flNewSpeed ) && flNewSpeed > 1e-4f )
+	{
+		const Vector vDirection = vNewVelocity / flNewSpeed;
+		const float flDrivenSpeed = Max( DotProduct( m_vSimulationVelocity, vDirection ), 0.0f );
+		const float flAllowedSpeed = flDrivenSpeed + Max( m_flPushableSpeedLimit, 0.0f );
+		if ( flNewSpeed > flAllowedSpeed )
+		{
+			const Vector vClampedVelocity = ClampPushVelocityAgainstNearbyContacts( vNewVelocity, flDeltaTime );
+			if ( ( vClampedVelocity - vNewVelocity ).LengthSqr() > 1e-6f )
+			{
+				vNewVelocity = vClampedVelocity;
+				vNewPosition = m_vOldPosition + vNewVelocity * flDeltaTime;
+				m_pCharacter->SetPosition( SourceToJolt::Distance( vNewPosition ), JPH::EActivation::DontActivate );
+				m_pCharacter->SetLinearVelocity( SourceToJolt::Distance( vNewVelocity ) );
+			}
+		}
+	}
 
 	// Cap the effective velocity: penetration-correction snaps can move the character much
 	// further in one step than legitimate motion ever does, and this derived value feeds
@@ -764,6 +925,7 @@ void JoltPhysicsPlayerController::SetObjectInternal( JoltPhysicsObject *pObject 
 	m_vMaxSpeed = vec3_origin;
 	m_vCurrentSpeed = vec3_origin;
 	m_vLastImpulse = vec3_origin;
+	m_vSimulationVelocity = vec3_origin;
 	m_flSecondsToArrival = 0.0f;
 	m_bEnable = false;
 	m_bUpdatedSinceLast = false;

@@ -26,7 +26,7 @@ class JoltPhysicsEnvironment;
 class JoltPhysicsConstraintGroup final : public IPhysicsConstraintGroup
 {
 public:
-	JoltPhysicsConstraintGroup();
+	explicit JoltPhysicsConstraintGroup( const constraint_groupparams_t &params );
 	~JoltPhysicsConstraintGroup() override;
 
 	void Activate() override;
@@ -38,8 +38,11 @@ public:
 
 	void AddConstraint( JoltPhysicsConstraint *pConstraint );
 	void RemoveConstraint( JoltPhysicsConstraint *pConstraint );
+	void ApplySolverIterations( JoltPhysicsConstraint *pConstraint ) const;
 
 private:
+	uint GetSolverIterations() const;
+
 	std::vector< JoltPhysicsConstraint * >	m_pConstraints;
 	constraint_groupparams_t				m_ErrorParams = {};
 };
@@ -86,6 +89,11 @@ public:
 	// Once per environment simulate step, after the Jolt update.
 	void PostSimulate();
 
+	// Apply the owning VPhysics constraint system's iteration count to Jolt's
+	// island-level solver overrides.
+	void ApplyGroupSolverIterations( uint nSolverIterations );
+	void RefreshGroupSolverIterations();
+
 	bool CheckBroken();
 
 private:
@@ -123,6 +131,6 @@ private:
 	float						m_AngularBreakImpulse = 0.0f;
 	float						m_SourceForceLimit = 0.0f;
 	float						m_SourceTorqueLimit = 0.0f;
-	float						m_BreakStrength = 1.0f;
+	float						m_ConstraintStrength = 1.0f;
 	float						m_BodyMassScale[2] = { 1.0f, 1.0f };
 };
