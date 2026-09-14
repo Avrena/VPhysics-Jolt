@@ -51,6 +51,7 @@ public:
 
 private:
 	void SetObjectInternal( JoltPhysicsObject *pObject );
+	Vector ClampPushVelocityAgainstNearbyContacts( const Vector &vVelocity, float flDeltaTime ) const;
 
 private:
 	
@@ -71,6 +72,7 @@ private:
 	Vector m_vMaxSpeed = vec3_origin;
 	Vector m_vCurrentSpeed = vec3_origin;
 	Vector m_vLastImpulse = vec3_origin;
+	Vector m_vSimulationVelocity = vec3_origin;
 
 	bool m_bEnable = false;
 	bool m_bUpdatedSinceLast = false;

@@ -13,6 +13,7 @@ class JoltPhysicsShadowController;
 class JoltPhysicsFluidController;
 class JoltPhysicsEnvironment;
 class JoltPhysicsObject;
+class JoltPhysicsConstraint;
 class IPhysicsEnvironment;
 
 #if defined( GAME_CSGO_OR_NEWER )
@@ -182,6 +183,8 @@ public:
 
 	void AddDestroyedListener( IJoltObjectDestroyedListener *pListener );
 	void RemoveDestroyedListener( IJoltObjectDestroyedListener *pListener );
+	void AddConstraint( JoltPhysicsConstraint *pConstraint );
+	void RemoveConstraint( JoltPhysicsConstraint *pConstraint );
 
 	// Grabs the position, adds addPos and teleports the object
 	void AddToPosition( JPH::Vec3Arg addPos );
@@ -283,6 +286,7 @@ public:
 	void RecaulculateFixedConstraintPartnerMovable();
 private:
 	void UpdateMaterialProperties();
+	void WakeConstrainedDynamicPartners();
 
 	// Josh:
 	// Always put m_pGameData first. Some games that will
@@ -337,6 +341,7 @@ private:
 	Vector m_vPlayerDrivenVelocity = vec3_origin;
 
 	CUtlVector< IJoltObjectDestroyedListener * > m_destroyedListeners;
+	std::vector< JoltPhysicsConstraint * > m_pConstraints;
 
 public:
 	// Per-other-body contact data accumulated during the last simulation step.
