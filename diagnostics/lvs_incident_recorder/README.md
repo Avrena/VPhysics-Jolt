@@ -1,42 +1,43 @@
-# September 12 SCPRP populated BRDM capture
+# Bounded LVS incident capture
 
 This is a temporary, server-only **observer**, not another vehicle/solver fix.
 It is separate from LVS and does not spawn entities, add bots, change physics,
 wrap LVS methods, repair wheels, or send code/data to clients.
 
-Deploy `lua/autorun/server/sv_ncg_lvs_incident_recorder.lua` as an optional addon.
-It defaults on and expires at **2026-09-13 04:00 server local time** (SCPRP is
-Asia/Shanghai). The native binary and LVS implementation remain unchanged.
+Deploy `lua/autorun/server/sv_vjolt_lvs_incident_recorder.lua` as an optional addon.
+It is disabled by default and expires two hours after loading. Explicitly enable
+`vjolt_lvs_recorder_enabled 1` only for an authorized recording session; then spawn
+or select the test vehicle. The native binary and LVS implementation are unchanged.
 
-## Public test: September 12, around 19:00 China time
+## Controlled test procedure
 
 1. After the final restart, spawn one BRDM in a clear, safe test area. The observer
    selects the first BRDM created, or the sole existing BRDM when loaded. It does
    not guess between multiple existing vehicles.
-2. Check `ncg_lvs_recorder_status`. Confirm the target entity index matches the
+2. Check `vjolt_lvs_recorder_status`. Confirm the target entity index matches the
    test vehicle, `last_tick` advances and `error` is absent. If necessary, select
-   it with `ncg_lvs_recorder_watch <entity index>` (server console/superadmin only).
+   it with `vjolt_lvs_recorder_watch <entity index>` (server console/superadmin only).
 3. Establish a healthy low-population baseline: settle, start engine, briefly
    drive, brake/handbrake and release. Do not replace this vehicle as players join.
 4. Repeat short, normal driving checks as the population grows, including around
    50, 75 and 100 real players. A parked vehicle alone does not exercise the known
    engine-start/brake path. No stressbots or NextBots are needed.
-5. On the first visible failure, use `ncg_lvs_recorder_mark <short observation>`
+5. On the first visible failure, use `vjolt_lvs_recorder_mark <short observation>`
    before repair/removal if safe, and note which action immediately preceded it.
    A `false` return means a capture is already pending, cooling down or capped;
    check status. The rolling checkpoint continues independently.
 
 The same APIs are available to server-side inspection:
-`NCG_LVS_RECORDER.Status()`, `.Watch(entity)`, `.Mark("observation")`.
-Set `ncg_lvs_recorder_enabled 0` to stop; this does not remove/change the vehicle.
+`VJOLT_LVS_RECORDER.Status()`, `.Watch(entity)`, `.Mark("observation")`.
+Set `vjolt_lvs_recorder_enabled 0` to stop; this does not remove/change the vehicle.
 
 ## Evidence and limits
 
-- DATA directory: `garrysmod/data/ncg_lvs_incidents/`.
+- DATA directory: `garrysmod/data/vjolt_lvs_incidents/`.
 - One vehicle, at most eight wheels and 24 visited constraints per wheel.
   A sample is marked `truncated` if either limit is hit.
-- Up to 25 Hz, hence every tick at the currently configured 22 Hz. A 256-frame
-  ring covers about 11.6 seconds at full tickrate, longer under server slowdown.
+- Up to 25 Hz. At a 22 Hz tick rate, a 256-frame ring covers about 11.6 seconds,
+  longer under server slowdown.
 - First observation, alternating rolling checkpoints every 15 seconds, and a
   final ring on entity removal, map cleanup, disable, expiry or orderly shutdown.
 - Incident pre-window is saved immediately; post-window after five seconds.
@@ -74,3 +75,11 @@ It checks buffer bounds/order, zero-index constraint identities, engine pre/post
 captures, load-tier reservation, rod errors, nonfinite velocity serialization,
 removal persistence, disable and expiry. It creates no real entities or hooks.
 These tests do **not** establish real-vehicle behavior or populated-server overhead.
+
+## Publication privacy
+
+Keep raw captures and deployment records private. They can contain map names,
+entity identifiers, world positions, timestamps, and operational state even though
+player names and account identifiers are excluded. Public reports should include
+only the minimal de-identified measurements needed to explain a regression, not
+server names, infrastructure paths, private schedules, or unreviewed capture files.

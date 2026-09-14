@@ -64,7 +64,7 @@ for i = 1, 4 do
 	vehicle.data._WheelEnts[i] = wheel
 end
 local cvar = {GetBool = function() return enabled end}
-local env = setmetatable({SERVER = true, NCG_LVS_RECORDER = false,
+local env = setmetatable({SERVER = true, VJOLT_LVS_RECORDER = false,
 	CreateConVar = function() return cvar end, GetConVar = function() return nil end,
 	SysTime = function() return now end, CurTime = function() return now end,
 	os = {time = function(t) return t and unix + 7200 or unix + math.floor(now) end,
@@ -82,7 +82,7 @@ local compiled = CompileString(SOURCE, "isolated LVS observer fixture", false)
 assert(isfunction(compiled), tostring(compiled))
 setfenv(compiled, env)
 compiled()
-local api = env.NCG_LVS_RECORDER
+local api = env.VJOLT_LVS_RECORDER
 local function step(n)
 	for _ = 1, n do
 		now, tickNumber = now + 1 / 22, tickNumber + 1
@@ -144,7 +144,7 @@ enabled = true
 CHECK(api.Watch(vehicle), "explicit observer-only watch can reattach")
 now = 7201
 step(1)
-CHECK(api.Status().expired and not api.Status().target, "dated canary expires and detaches")
+CHECK(api.Status().expired and not api.Status().target, "bounded session expires and detaches")
 CHECK(not api.Watch(vehicle), "expired canary stays inert")
 return {checks = "complete", fake_disk_bytes = api.Status().disk_bytes, real_entities_created = 0,
 	real_hooks_installed = 0, real_files_written = 0}

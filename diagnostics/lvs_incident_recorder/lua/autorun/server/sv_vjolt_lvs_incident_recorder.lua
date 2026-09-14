@@ -1,12 +1,12 @@
 -- Optional SERVER-ONLY observer. Does not spawn, drive, repair, freeze or edit entities.
--- This dated canary is intentionally inert after the September 12 populated test.
+-- Disabled by default. An explicitly enabled session expires two hours after load.
 if not SERVER then return end
-if NCG_LVS_RECORDER then return end -- Auto-refresh must not discard a live ring.
+if VJOLT_LVS_RECORDER then return end -- Auto-refresh must not discard a live ring.
 
-local ENABLED = CreateConVar("ncg_lvs_recorder_enabled", "1", FCVAR_ARCHIVE,
+local ENABLED = CreateConVar("vjolt_lvs_recorder_enabled", "0", FCVAR_ARCHIVE,
 	"Observe one BRDM without changing physics; 0 stops the recorder.")
-local EXPIRES = os.time({year = 2026, month = 9, day = 13, hour = 4})
-local DIR, HOOK = "ncg_lvs_incidents", "NCG_LVSIncidentRecorder"
+local EXPIRES = os.time() + 2 * 60 * 60
+local DIR, HOOK = "vjolt_lvs_incidents", "VJOLT_LVSIncidentRecorder"
 local MAX_FRAMES, MAX_WHEELS, MAX_CONSTRAINTS = 256, 8, 24
 local MAX_FILE, MAX_DISK = 4 * 1024 * 1024, 64 * 1024 * 1024
 local session = os.date("!%Y%m%dT%H%M%SZ") .. "_" .. engine.TickCount()
@@ -14,7 +14,7 @@ local target, watch, lastError, lastFile
 local watchNumber, stopped = 0, false
 local diskBytes, writes, sampleSeconds, sampleCount, sampleMax = 0, 0, 0, 0, 0
 local api = {}
-NCG_LVS_RECORDER = api
+VJOLT_LVS_RECORDER = api
 file.CreateDir(DIR)
 for _, name in ipairs(file.Find(DIR .. "/*.json", "DATA")) do
 	diskBytes = diskBytes + math.max(file.Size(DIR .. "/" .. name, "DATA"), 0)
@@ -256,7 +256,7 @@ local function tick()
 	if not ENABLED:GetBool() or os.time() >= EXPIRES then detach("disabled or expired") return end
 	if not IsValid(target) then detach("vehicle removed") return end
 	local now = SysTime()
-	-- At the current 22 Hz this samples every tick. Do not exceed 25 Hz on other configs.
+	-- Sample every tick at 22 Hz, without exceeding 25 Hz on faster configurations.
 	if watch.lastSample and now - watch.lastSample < 0.039 then return end
 	local f = snapshot(now)
 	watch.lastSample = now
@@ -324,13 +324,13 @@ hook.Add("ShutDown", HOOK, function() if watch then pcall(detach, "server shutdo
 hook.Add("PreCleanupMap", HOOK, function() if watch then pcall(detach, "map cleanup") end end)
 
 local function allowed(ply) return not IsValid(ply) or ply:IsSuperAdmin() end
-concommand.Add("ncg_lvs_recorder_status", function(ply)
+concommand.Add("vjolt_lvs_recorder_status", function(ply)
 	if allowed(ply) then print(util.TableToJSON(api.Status(), true)) end
 end)
-concommand.Add("ncg_lvs_recorder_watch", function(ply, _, args)
+concommand.Add("vjolt_lvs_recorder_watch", function(ply, _, args)
 	if allowed(ply) then print(api.Watch(Entity(tonumber(args[1]) or -1))) end
 end)
-concommand.Add("ncg_lvs_recorder_mark", function(ply, _, _, text)
+concommand.Add("vjolt_lvs_recorder_mark", function(ply, _, _, text)
 	if allowed(ply) then print(api.Mark(text)) end
 end)
 
