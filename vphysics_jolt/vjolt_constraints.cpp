@@ -33,13 +33,6 @@ static ConVar vjolt_constraint_position_substeps( "vjolt_constraint_position_sub
 
 static ConVar vjolt_ragdoll_min_torque_friction( "vjolt_ragdoll_min_torque_friction", "0.05" );
 
-static ConVar vjolt_onlyrot_recapture_ticks( "vjolt_onlyrot_recapture_ticks", "2", FCVAR_NONE,
-	"Re-zero rotation-only (onlyAngularLimits) constraint frames to the bodies' current relative "
-	"orientation this many simulation steps after creation (0 = keep the creation-time capture). "
-	"Lua contraptions (LVS/simfphys) teleport wheels and anchors into their intended pose one tick "
-	"AFTER constraining them, so the creation-time frames bake the spawn transient in as permanent "
-	"joint error." );
-
 // Diagnostic knob, default off: hardening mid-settle freezes whatever pose the spawn
 // transient left (live trials: 30 ticks @ 8 Hz made LVS tank tilt WORSE, 6/6 vs 7/12
 // baseline). The actual fix for transient-captured contraptions is the gentler
@@ -522,30 +515,15 @@ void JoltPhysicsConstraint::InitialiseRagdoll( IPhysicsConstraintGroup *pGroup, 
 			// vehicle wheel's spin axis) it would act as a permanent brake.
 			settings->mMaxFriction[ eAxis ] = SourceToJolt::Torque( ragdoll.axes[i].torque );
 
-			if ( flRange <= DEG2RAD( 1.0f ) )
-			{
-				// Near-zero windows are IVP's "hold this alignment" idiom
-				// (LVS locks wheel yaw/roll with +/-0.0001deg). IVP's limits are
-				// compliant and let ground contact pull a transient-crooked
-				// capture straight; MakeFixedAxis is an infinitely stiff weld
-				// that locks the capture error in forever. Keep the window but
-				// floor it at +/-0.5deg around its midpoint, with a small
-				// friction floor so the slack doesn't rattle.
-				const float flCenter = 0.5f * ( flMin + flMax );
-				const float flHalfRange = Max( 0.5f * flRange, DEG2RAD( 0.5f ) );
-				settings->SetLimitedAxis( eAxis,
-					Max( flCenter - flHalfRange, -JPH::JPH_PI ),
-					Min( flCenter + flHalfRange, JPH::JPH_PI ) );
-				settings->mMaxFriction[ eAxis ] = Max( settings->mMaxFriction[ eAxis ], flMinTorqueFriction );
-			}
-			else if ( flRange >= DEG2RAD( 359.0f ) )
+			if ( flRange >= DEG2RAD( 359.0f ) )
 			{
 				settings->MakeFreeAxis( eAxis );
 			}
 			else
 			{
-				// Jolt's swing-twist part accepts the full [-pi, pi] on every
-				// rotation axis; clamp to keep SetLimitedAxis inputs sane.
+				// Preserve even near-zero authored windows. Jolt treats small
+				// centered swing/twist limits as locked; widening LVS's
+				// +/-0.0001deg to +/-0.5deg instead permits a persistent lean.
 				const float flCap = DEG2RAD( 180.0f );
 				settings->SetLimitedAxis( eAxis,
 					Max( flMin, -flCap ),
@@ -553,21 +531,11 @@ void JoltPhysicsConstraint::InitialiseRagdoll( IPhysicsConstraintGroup *pGroup, 
 			}
 		}
 
+		// Keep the Source-authored local frames for the joint's lifetime.
+		// LVS's common spawn rotation preserves their relative alignment;
+		// recapturing a later physics pose would turn transient tilt into
+		// the new rest pose instead of correcting it.
 		pConstraint = settings->Create( *pRefBody, *pAttBody );
-
-		// The frames above came from Source matrices captured at the Lua call.
-		// LVS/simfphys teleport wheels and steer anchors into their intended
-		// orientation one tick AFTER constraining them (and a 10-wheel tank
-		// stages this over many ticks), so that capture routinely encodes a
-		// mid-transient pose. Schedule a one-shot re-zero of the frames onto
-		// whatever relative orientation the bodies actually hold a few steps
-		// from now.
-		const int nRecaptureTicks = vjolt_onlyrot_recapture_ticks.GetInt();
-		if ( nRecaptureTicks > 0 )
-		{
-			m_pRotOnlySettings = settings;
-			m_nRotOnlyRecaptureTicks = nRecaptureTicks;
-		}
 	}
 	else if ( uDOFCount == 0 )
 	{
@@ -940,7 +908,6 @@ static float MaxInverseMass( JoltPhysicsObject *pA, JoltPhysicsObject *pB )
 
 void JoltPhysicsConstraint::PostSimulate()
 {
-	RecaptureRotOnlyFrames();
 	HardenLengthSpring();
 	CheckBroken();
 }
@@ -986,39 +953,6 @@ void JoltPhysicsConstraint::HardenLengthSpring()
 	steady.mDamping = vjolt_length_spring_damping.GetFloat();
 
 	static_cast< JPH::DistanceConstraint * >( m_pConstraint.GetPtr() )->SetLimitsSpringSettings( steady );
-}
-
-void JoltPhysicsConstraint::RecaptureRotOnlyFrames()
-{
-	if ( m_nRotOnlyRecaptureTicks <= 0 )
-		return;
-
-	if ( --m_nRotOnlyRecaptureTicks > 0 )
-		return;
-
-	JPH::Ref< JPH::SixDOFConstraintSettings > settings = std::move( m_pRotOnlySettings );
-
-	if ( !settings || !m_pConstraint || !m_pObjReference || !m_pObjAttached )
-		return;
-
-	JPH::Body *pRefBody = m_pObjReference->GetBody();
-	JPH::Body *pAttBody = m_pObjAttached->GetBody();
-
-	// Re-express the attached body's constraint frame in reference-body local
-	// space at the orientations the bodies hold RIGHT NOW, so the pose they have
-	// actually settled into (after LVS's constrain-then-teleport init) becomes
-	// the joint's rest pose instead of whatever the mid-transient capture was.
-	const JPH::Quat qRefToAtt = pRefBody->GetRotation().Conjugated() * pAttBody->GetRotation();
-	settings->mAxisX1 = qRefToAtt * settings->mAxisX2;
-	settings->mAxisY1 = qRefToAtt * settings->mAxisY2;
-
-	const bool bEnabled = m_pConstraint->GetEnabled();
-	m_pPhysicsSystem->RemoveConstraint( m_pConstraint );
-	m_pConstraint = settings->Create( *pRefBody, *pAttBody );
-	m_pConstraint->SetEnabled( bEnabled );
-	if ( m_pGroup )
-		m_pGroup->ApplySolverIterations( this );
-	m_pPhysicsSystem->AddConstraint( m_pConstraint );
 }
 
 bool JoltPhysicsConstraint::CheckBroken()
@@ -1102,8 +1036,6 @@ void JoltPhysicsConstraint::DestroyConstraint()
 		m_pObjReference = nullptr;
 	}
 
-	m_pRotOnlySettings = nullptr;
-	m_nRotOnlyRecaptureTicks = 0;
 	m_nLengthSpringWarmupTicks = 0;
 
 	if ( m_pConstraint )
