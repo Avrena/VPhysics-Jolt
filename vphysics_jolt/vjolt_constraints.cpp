@@ -141,6 +141,25 @@ void JoltPhysicsConstraintGroup::ApplySolverIterations( JoltPhysicsConstraint *p
 
 //-------------------------------------------------------------------------------------------------
 
+static void ConfigureRotationOnlyCorrection( JPH::Constraint *pConstraint )
+{
+	if ( !pConstraint || pConstraint->GetSubType() != JPH::EConstraintSubType::SixDOF )
+		return;
+
+	auto *pSixDOF = static_cast< JPH::SixDOFConstraint * >( pConstraint );
+	for ( int i = 0; i < 3; ++i )
+		if ( !pSixDOF->IsFreeAxis( static_cast< JPH::SixDOFConstraint::EAxis >( i ) ) )
+			return;
+
+	// The gentler global contact-depenetration policy must not throttle a
+	// rotation-only joint following a game-moved anchor. Keep Jolt's standard
+	// angular correction, without changing contact/rope solving or adding
+	// velocity to teleported anchors. Reapply this runtime policy on restore.
+	pSixDOF->SetRotationPositionCorrection( JPH::PhysicsSettings().mBaumgarte );
+}
+
+//-------------------------------------------------------------------------------------------------
+
 JoltPhysicsConstraint::JoltPhysicsConstraint( JoltPhysicsEnvironment *pPhysicsEnvironment, IPhysicsObject *pReferenceObject, IPhysicsObject *pAttachedObject, constraintType_t Type, JPH::Constraint* pConstraint, void *pGameData )
 	: m_pPhysicsEnvironment( pPhysicsEnvironment )
 	, m_pPhysicsSystem( pPhysicsEnvironment->GetPhysicsSystem() )
@@ -160,6 +179,8 @@ JoltPhysicsConstraint::JoltPhysicsConstraint( JoltPhysicsEnvironment *pPhysicsEn
 	// so reapply the stock stiff-spring behavior without changing save formats.
 	if ( m_pConstraint && m_ConstraintType == CONSTRAINT_LENGTH )
 		static_cast< JPH::DistanceConstraint * >( m_pConstraint.GetPtr() )->SetLimitsVelocityBias( 1.0f, 0.5f );
+	else if ( m_ConstraintType == CONSTRAINT_RAGDOLL )
+		ConfigureRotationOnlyCorrection( m_pConstraint.GetPtr() );
 }
 
 JoltPhysicsConstraint::~JoltPhysicsConstraint()
@@ -536,6 +557,7 @@ void JoltPhysicsConstraint::InitialiseRagdoll( IPhysicsConstraintGroup *pGroup, 
 		// recapturing a later physics pose would turn transient tilt into
 		// the new rest pose instead of correcting it.
 		pConstraint = settings->Create( *pRefBody, *pAttBody );
+		ConfigureRotationOnlyCorrection( pConstraint );
 	}
 	else if ( uDOFCount == 0 )
 	{

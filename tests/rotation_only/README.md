@@ -1,7 +1,8 @@
 # Rotation-only constraint regressions
 
 This fixture compiles the actual `InitialiseRagdoll` rotation-only branch,
-`RagdollLimits_t`, and `PostSimulate` extracted by `prepare.cmake`. When testing
+`RagdollLimits_t`, `ConfigureRotationOnlyCorrection`, and `PostSimulate` extracted
+by `prepare.cmake`. When testing
 an older source revision it also extracts the actual delayed recapture method.
 Missing source boundaries fail preparation rather than silently testing a copy
 of the implementation.
@@ -9,7 +10,8 @@ of the implementation.
 The fixture supplies only the SDK input fields and out-of-scope engine services
 needed by those functions. It links an existing, matching Jolt static library;
 it does not require a Source SDK or Jolt rebuild. The shim is not an engine ABI
-test. Contacts are deliberately disabled to isolate the angular constraint.
+test. Most cases disable contacts to isolate the angular constraint; the
+moving-master ground case explicitly enables gravity and wheel/ground friction.
 
 Coverage:
 
@@ -23,9 +25,19 @@ Coverage:
   wheel can spin and translate independently of its static steering master.
 - An all-angular-axis brake socket stops spin at the current spin phase;
   removing it permits spin again without changing the axle direction.
+- A moving static steering master tracks through reversal with two and six
+  position iterations. The negative control clears the override on both mirrored
+  sockets, reproducing the previous inheritance of global Baumgarte 0.01.
+- With ground contact and drive acceleration, the wheel continues moving through
+  steering reversal. This is one sphere/ground pair, not a full BRDM drivetrain.
+- A settings round trip keeps the binary format unchanged; the extracted Source
+  helper reapplies the runtime correction policy on recreation. Other SixDOF
+  constraints inherit the global factor and translation correction is unchanged.
 
 The simulation uses 22 Hz, two collision substeps, 10 velocity iterations,
-two position iterations, and Baumgarte 0.01. Recovery checks allow 0.01 degrees
+two position iterations (six in additional steering cases), and global Baumgarte
+0.01. Only Source rotation-only joints opt into Jolt's standard angular correction.
+Recovery checks allow 0.01 degrees
 of solver residual; they do not assert exact floating-point zero or a live
 vehicle recovery-time guarantee. No server, bots, or live entities are used.
 Authored settings retain Jolt's own small-angle locking semantics; this does
@@ -49,7 +61,9 @@ c++ -std=c++17 -O2 -DNDEBUG -DJPH_DEBUG_RENDERER \
 ```
 
 Set `JOLT_SOURCE` to the directory containing `Jolt/` and `JOLT_LIBRARY` to
-the matching archive. Optional `-DSOURCE_FILE=/path/to/vjolt_constraints.cpp`
+the matching, rebuilt archive: `SixDOFConstraint` gained a runtime field, so a
+stale archive may link but is not ABI-compatible. Optional
+`-DSOURCE_FILE=/path/to/vjolt_constraints.cpp`
 selects the baseline for preparation without changing the checkout.
 
 Manual gates remain: BRDM/LAV spawn, engine start/stop, braking and brake release,

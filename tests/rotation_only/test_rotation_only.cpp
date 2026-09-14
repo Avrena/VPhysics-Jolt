@@ -6,7 +6,9 @@
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
+#include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Constraints/SixDOFConstraint.h>
+#include <Jolt/Physics/StateRecorderImpl.h>
 
 #include <algorithm>
 #include <cmath>
@@ -30,6 +32,7 @@ struct constraint_ragdollparams_t
 namespace SourceToJolt { static float Torque(float value) { return value * 0.0254f * 0.0254f; } }
 static const struct { int GetInt() const { return 2; } } vjolt_onlyrot_recapture_ticks;
 #include "ragdoll_limits.inl"
+#include "rotation_correction.inl"
 
 class JoltPhysicsConstraint
 {
@@ -65,7 +68,7 @@ public:
 #include "post_simulate.inl"
 #include "recapture.inl"
 
-// No contacts: isolate angular joints and prove translation is not anchored.
+// Layer zero isolates joints. Layer one permits the optional ground-contact test.
 class BroadPhase final : public JPH::BroadPhaseLayerInterface
 {
 public:
@@ -77,11 +80,11 @@ public:
 };
 class ObjectBroadPhase final : public JPH::ObjectVsBroadPhaseLayerFilter
 {
-    bool ShouldCollide(JPH::ObjectLayer, JPH::BroadPhaseLayer) const override { return false; }
+    bool ShouldCollide(JPH::ObjectLayer layer, JPH::BroadPhaseLayer) const override { return layer == 1; }
 };
 class ObjectPairs final : public JPH::ObjectLayerPairFilter
 {
-    bool ShouldCollide(JPH::ObjectLayer, JPH::ObjectLayer) const override { return false; }
+    bool ShouldCollide(JPH::ObjectLayer a, JPH::ObjectLayer b) const override { return a == 1 && b == 1; }
 };
 struct World
 {
@@ -91,10 +94,11 @@ struct World
     JPH::TempAllocatorImpl allocator{4 * 1024 * 1024};
     JPH::JobSystemSingleThreaded jobs{2048};
     JPH::PhysicsSystem system;
-    World()
+    bool contacts;
+    explicit World(bool withContacts = false) : contacts(withContacts)
     {
         system.Init(16, 0, 64, 64, broad, objectBroad, pairs);
-        system.SetGravity(JPH::Vec3::sZero());
+        system.SetGravity(contacts ? JPH::Vec3(0, -9.81f, 0) : JPH::Vec3::sZero());
         auto settings = system.GetPhysicsSettings();
         settings.mNumVelocitySteps = 10;
         settings.mNumPositionSteps = 2;
@@ -110,8 +114,9 @@ struct World
     }
     JPH::Body &Body(bool dynamic, JPH::Quat rotation = JPH::Quat::sIdentity())
     {
-        JPH::BodyCreationSettings settings(new JPH::SphereShape(0.2f), JPH::RVec3::sZero(), rotation,
-            dynamic ? JPH::EMotionType::Dynamic : JPH::EMotionType::Static, 0);
+        JPH::BodyCreationSettings settings(new JPH::SphereShape(0.2f), contacts ? JPH::RVec3(0, 0.2f, 0) : JPH::RVec3::sZero(), rotation,
+            dynamic ? JPH::EMotionType::Dynamic : JPH::EMotionType::Static, contacts && dynamic ? 1 : 0);
+        settings.mFriction = 0.8f;
         settings.mAllowSleeping = false;
         settings.mLinearDamping = settings.mAngularDamping = 0;
         settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
@@ -120,6 +125,13 @@ struct World
         auto *body = bi.CreateBody(settings);
         bi.AddBody(body->GetID(), dynamic ? JPH::EActivation::Activate : JPH::EActivation::DontActivate);
         return *body;
+    }
+    JPH::BodyID Ground()
+    {
+        JPH::BodyCreationSettings settings(new JPH::BoxShape(JPH::Vec3(100, 0.1f, 100)),
+            JPH::RVec3(0, -0.1f, 0), JPH::Quat::sIdentity(), JPH::EMotionType::Static, 1);
+        settings.mFriction = 0.8f;
+        return system.GetBodyInterface().CreateAndAddBody(settings, JPH::EActivation::DontActivate);
     }
     void Step() { system.Update(1.0f / 22.0f, 2, &allocator, &jobs); }
 };
@@ -268,6 +280,123 @@ static void TestBrakeLockRelease()
     Check(Near(wheel.GetAngularVelocity().GetX(), 8.0f, 0.01f), "removing brake socket restores free spin");
 }
 
+// Characterize a moving steering target separately from the settled-pose tests.
+// No contacts: this can establish angular lag, not prove live vehicle traction.
+static void TestMovingSteeringMaster(unsigned positionSteps, bool inherit, bool contact = false)
+{
+    World world(contact);
+    const JPH::BodyID ground = contact ? world.Ground() : JPH::BodyID();
+    auto physicsSettings = world.system.GetPhysicsSettings();
+    physicsSettings.mNumPositionSteps = positionSteps;
+    world.system.SetPhysicsSettings(physicsSettings);
+    auto &wheel = world.Body(true);
+    auto &master = world.Body(false);
+    constraint_ragdollparams_t params;
+    JoltPhysicsConstraint axle(world.system, wheel, master, params, JPH::Mat44::sIdentity(), JPH::Mat44::sIdentity());
+    std::swap(params.axes[1].minRotation, params.axes[1].maxRotation);
+    std::swap(params.axes[2].minRotation, params.axes[2].maxRotation);
+    JoltPhysicsConstraint mirror(world.system, master, wheel, params, JPH::Mat44::sIdentity(), JPH::Mat44::sIdentity());
+    if (inherit)
+    {
+        // Negative control: reproduce the previous global-policy coupling.
+        static_cast<JPH::SixDOFConstraint *>(axle.m_pConstraint.GetPtr())->SetRotationPositionCorrection(-1);
+        static_cast<JPH::SixDOFConstraint *>(mirror.m_pConstraint.GetPtr())->SetRotationPositionCorrection(-1);
+    }
+    auto &bi = world.system.GetBodyInterface();
+    bi.SetAngularVelocity(wheel.GetID(), JPH::Vec3(8, 0, 0));
+    float worstError = 0.0f;
+    float firstTurnError = 0.0f;
+    float reversalError = 0.0f;
+    unsigned contactSteps = 0;
+    for (int tick = 0; tick < 66; ++tick)
+    {
+        // 0 -> 30 degrees over one third of a second, hold, then reverse.
+        const float target = tick < 22 ? 30.0f * std::min((tick + 1) / 7.0f, 1.0f)
+            : 30.0f - 60.0f * std::min((tick - 21) / 7.0f, 1.0f);
+        bi.SetRotation(master.GetID(), JPH::Quat::sRotation(contact ? JPH::Vec3::sAxisY() : JPH::Vec3::sAxisZ(), DEG2RAD(target)), JPH::EActivation::DontActivate);
+        if (contact)
+            bi.SetAngularVelocity(wheel.GetID(), wheel.GetAngularVelocity() + (master.GetRotation() * JPH::Vec3::sAxisX()) * (16.0f / 22.0f));
+        world.Step();
+        axle.PostSimulate();
+        mirror.PostSimulate();
+        const float error = AxisError(wheel.GetRotation() * JPH::Vec3::sAxisX(), master.GetRotation() * JPH::Vec3::sAxisX());
+        worstError = std::max(worstError, error);
+        if (tick == 6) firstTurnError = error;
+        if (tick == 28) reversalError = error;
+        if (contact && world.system.WereBodiesInContact(wheel.GetID(), ground)) ++contactSteps;
+    }
+    const float finalError = AxisError(wheel.GetRotation() * JPH::Vec3::sAxisX(), master.GetRotation() * JPH::Vec3::sAxisX());
+    std::printf("moving master %s / %u position steps / contact %d: turn %.4f deg, reversal %.4f deg, worst %.4f deg, settled %.4f deg, speed %.4f m/s, contact steps %u\n",
+        inherit ? "global 0.01" : "scoped default", positionSteps, int(contact), firstTurnError, reversalError, worstError, finalError, wheel.GetLinearVelocity().Length(), contactSteps);
+    Check(std::isfinite(worstError) && std::isfinite(finalError), "moving master characterization stays finite");
+    if (!inherit)
+    {
+        Check(worstError < (positionSteps == 2 ? 2.0f : 0.25f), "moving steering master tracks without large angular lag");
+        Check(finalError < 0.01f, "steering reversal settles back to the authored axle");
+    }
+    if (contact)
+    {
+        Check(contactSteps > 50, "steering test actually exercises sustained ground contact");
+        Check(wheel.GetLinearVelocity().Length() > 0.5f, "driven wheel retains movement with ground friction");
+    }
+}
+
+static void TestCorrectionScopeAndRecreation()
+{
+    World world;
+    auto &wheel = world.Body(true);
+    auto &master = world.Body(false);
+    constraint_ragdollparams_t params;
+    JoltPhysicsConstraint axle(world.system, wheel, master, params, JPH::Mat44::sIdentity(), JPH::Mat44::sIdentity());
+    JPH::StateRecorderImpl saved;
+    Settings(axle)->SaveBinaryState(saved);
+    saved.Rewind();
+    auto result = JPH::ConstraintSettings::sRestoreFromBinaryState(saved);
+    Check(result.IsValid(), "existing settings format restores without a new serialized field");
+    if (result.IsValid())
+    {
+        JPH::Ref<JPH::TwoBodyConstraint> restored = static_cast<JPH::TwoBodyConstraintSettings *>(result.Get().GetPtr())->Create(wheel, master);
+        auto *six = static_cast<JPH::SixDOFConstraint *>(restored.GetPtr());
+        Check(six->GetRotationPositionCorrection() == -1.0f, "fresh Jolt constraint inherits global correction by default");
+        ConfigureRotationOnlyCorrection(six);
+        Check(six->GetRotationPositionCorrection() == JPH::PhysicsSettings().mBaumgarte, "Source recreation helper reapplies the angular policy");
+        JPH::StateRecorderImpl resaved;
+        six->GetConstraintSettings()->SaveBinaryState(resaved);
+        Check(saved.GetData() == resaved.GetData(), "runtime correction policy leaves serialized settings unchanged");
+    }
+    ConfigureRotationOnlyCorrection(nullptr);
+    for (bool fullyLocked : {false, true})
+    {
+        float position[2], angle[2];
+        for (int override = 0; override < 2; ++override)
+        {
+            World test;
+            auto &body = test.Body(true);
+            auto &anchor = test.Body(false);
+            JPH::SixDOFConstraintSettings settings;
+            settings.mSpace = JPH::EConstraintSpace::LocalToBodyCOM;
+            settings.MakeFixedAxis(JPH::SixDOFConstraint::EAxis::TranslationX);
+            settings.MakeFixedAxis(JPH::SixDOFConstraint::EAxis::RotationY);
+            settings.MakeFixedAxis(JPH::SixDOFConstraint::EAxis::RotationZ);
+            if (fullyLocked) settings.MakeFixedAxis(JPH::SixDOFConstraint::EAxis::RotationX);
+            // Keep the translation basis on the static body, so correcting the
+            // dynamic body's angle cannot rotate the axis being compared.
+            JPH::Ref<JPH::TwoBodyConstraint> raw = settings.Create(anchor, body);
+            auto *six = static_cast<JPH::SixDOFConstraint *>(raw.GetPtr());
+            ConfigureRotationOnlyCorrection(six);
+            Check(six->GetRotationPositionCorrection() == -1.0f, "Source helper leaves translation-constrained SixDOF untouched");
+            if (override) six->SetRotationPositionCorrection(JPH::PhysicsSettings().mBaumgarte);
+            test.system.GetBodyInterface().SetPositionAndRotation(body.GetID(), JPH::RVec3(1, 0, 0),
+                JPH::Quat::sRotation(JPH::Vec3::sAxisZ(), DEG2RAD(10.0f)), JPH::EActivation::Activate);
+            six->SolvePositionConstraint(1.0f / 22.0f, 0.01f);
+            position[override] = body.GetPosition().GetX();
+            angle[override] = AxisError(body.GetRotation() * JPH::Vec3::sAxisX(), JPH::Vec3::sAxisX());
+        }
+        Check(Near(position[0], position[1]), "angular override does not alter translational correction");
+        Check(angle[1] < angle[0] * 0.9f, "angular override reaches partial and fully locked rotation solves");
+    }
+}
+
 int main()
 {
     JPH::RegisterDefaultAllocator();
@@ -278,6 +407,14 @@ int main()
     TestRestFrameAndRecovery(2.0f);
     TestCommonSpawnRotationAndFreeMotion();
     TestBrakeLockRelease();
+    for (unsigned positionSteps : {2u, 6u})
+    {
+        TestMovingSteeringMaster(positionSteps, true);
+        TestMovingSteeringMaster(positionSteps, false);
+    }
+    TestMovingSteeringMaster(6, true, true);
+    TestMovingSteeringMaster(6, false, true);
+    TestCorrectionScopeAndRecreation();
     JPH::UnregisterTypes();
     delete JPH::Factory::sInstance;
     JPH::Factory::sInstance = nullptr;

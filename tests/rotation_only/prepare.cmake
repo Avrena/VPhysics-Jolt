@@ -25,6 +25,15 @@ endfunction()
 
 extract_between("struct RagdollLimits_t" "void JoltPhysicsConstraint::InitialiseRagdoll("
     "ragdoll_limits.inl")
+string(FIND "${source}" "static void ConfigureRotationOnlyCorrection(" correction)
+if(correction GREATER_EQUAL 0)
+    extract_between("static void ConfigureRotationOnlyCorrection("
+        "JoltPhysicsConstraint::JoltPhysicsConstraint(" "rotation_correction.inl")
+else()
+    # Before this policy existed, recreation had no corresponding operation.
+    file(WRITE "${OUTPUT_DIR}/rotation_correction.inl"
+        "static void ConfigureRotationOnlyCorrection(JPH::Constraint *) {}\n")
+endif()
 extract_between("\tif ( ragdoll.onlyAngularLimits )" "\n\telse if ( uDOFCount == 0 )"
     "rotation_mapping.inl")
 extract_between("void JoltPhysicsConstraint::PostSimulate()"
