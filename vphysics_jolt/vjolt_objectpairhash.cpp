@@ -47,8 +47,12 @@ void JoltPhysicsObjectPairHash::RemoveObjectPair( void *pObject0, void *pObject1
     m_PairHashes[ GetHashArrayIndex( PointerHasher{}( pair ) ) ].erase( pair );
     m_ObjectHashes[ GetHashArrayIndex( std::hash< void* >()( pObject0 ) ) ].erase( pair );
     m_ObjectHashes[ GetHashArrayIndex( std::hash< void* >()( pObject1 ) ) ].erase( pair );
-    m_Objects.erase( pObject0 );
-    m_Objects.erase( pObject1 );
+    // Each pair contributes one reference per endpoint. erase(key) on a
+    // multiset would discard every reference, including other live pairs.
+    if ( auto it = m_Objects.find( pObject0 ); it != m_Objects.end() )
+        m_Objects.erase( it );
+    if ( auto it = m_Objects.find( pObject1 ); it != m_Objects.end() )
+        m_Objects.erase( it );
 }
 
 bool JoltPhysicsObjectPairHash::IsObjectPairInHash( void *pObject0, void *pObject1 )
@@ -65,7 +69,11 @@ void JoltPhysicsObjectPairHash::RemoveAllPairsForObject( void *pObject0 )
     {
         auto pair = *it++;
 
-        RemoveObjectPair( pair.first, pair.second );
+        // A bucket is not an object's adjacency list: unrelated pointer keys
+        // can hash here too. In particular, entity destruction must not erase
+        // another vehicle's collision exclusions.
+        if ( pair.first == pObject0 || pair.second == pObject0 )
+            RemoveObjectPair( pair.first, pair.second );
     }
 }
 
@@ -86,10 +94,11 @@ int JoltPhysicsObjectPairHash::GetPairListForObject( void *pObject0, int nMaxCou
     auto& objectHashes = m_ObjectHashes[GetHashArrayIndex( std::hash< void* >()( pObject0 ) )];
 
     int nCount = 0;
-    for ( auto it = objectHashes.begin(); it != objectHashes.end() && nCount < nMaxCount; ++it, ++nCount )
+    for ( auto it = objectHashes.begin(); it != objectHashes.end() && nCount < nMaxCount; ++it )
     {
         auto pair = *it;
-        ppObjectList[ nCount ] = pair.second != pObject0 ? pair.second : pair.first;
+        if ( pair.first == pObject0 || pair.second == pObject0 )
+            ppObjectList[ nCount++ ] = pair.second != pObject0 ? pair.second : pair.first;
     }
 
     return nCount;

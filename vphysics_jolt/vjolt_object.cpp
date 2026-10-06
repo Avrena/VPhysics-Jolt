@@ -20,6 +20,7 @@
 #include "vjolt_controller_shadow.h"
 
 #include "vjolt_object.h"
+#include "vjolt_constraints.h"
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -401,8 +402,13 @@ void JoltPhysicsObject::RecheckContactPoints( bool bSearchForNewContacts /*= fal
 
 void JoltPhysicsObject::SetMass( float mass )
 {
-	// To match regular VPhysics, allow 0 here but not at init.
-	mass = Clamp( mass, 0.0f, VPHYSICS_MAX_MASS );
+	// IVP clamps runtime mass to a finite positive value. More importantly, its
+	// change_mass() scales the object's CURRENT inertia tensor by the mass ratio;
+	// it does not rebuild inertia from the collision shape. Callers such as LVS
+	// deliberately set a custom wheel inertia once, then temporarily double the
+	// mass while the brake lock is active. Rebuilding from the shape here loses
+	// that authored inertia permanently on the first lock/unlock transition.
+	mass = Clamp( mass, 1.0f, VPHYSICS_MAX_MASS );
 
 	m_flCachedMass = mass;
 	m_flCachedInvMass = mass ? 1.0f / mass : 0.0f;
@@ -410,16 +416,7 @@ void JoltPhysicsObject::SetMass( float mass )
 	if ( !IsStatic() )
 	{
 		JPH::MotionProperties* pMotionProperties = m_pBody->GetMotionProperties();
-		// Mass is already in KG. IVP is weird.
-
-		// Josh: This is what we used to do and it was giving VERY whacky results
-		// when moving objects around after calling SetMass.
-		// pMotionProperties->SetInverseMass( m_flCachedInvMass );
-		// This method below seems to work properly because it deals with all of the inertia crap.
-		JPH::MassProperties massProperties = m_pBody->GetShape()->GetMassProperties();
-		massProperties.ScaleToMass( mass );
-		massProperties.mInertia( 3, 3 ) = 1.0f;
-		pMotionProperties->SetMassProperties( JPH::EAllowedDOFs::All, massProperties );
+		pMotionProperties->ScaleToMass( mass );
 
 		CalculateBuoyancy();
 		RecomputeDrag();
@@ -611,10 +608,22 @@ void JoltPhysicsObject::SetPosition( const Vector &worldPosition, const QAngle &
 
 	JPH::Vec3 joltPosition = SourceToJolt::Distance( worldPosition );
 	JPH::Quat joltRotation = SourceToJolt::Angle( angles );
+	// A SetAngles round trip can shift the Source-space origin by one float ULP near map
+	// bounds. Treat that as unchanged so an otherwise sleeping constraint island stays asleep.
+	constexpr float flPositionTolerance = SourceToJolt::Distance( 1.0f / 512.0f );
+	const JPH::Quat currentRotation = m_pBody->GetRotation();
+	const bool bPositionChanged = !m_pBody->GetPosition().IsClose( joltPosition, flPositionTolerance * flPositionTolerance );
+	const bool bRotationChanged = !currentRotation.IsClose( joltRotation ) && !currentRotation.IsClose( -joltRotation );
 
 	JPH::BodyInterface &bodyInterface = m_pPhysicsSystem->GetBodyInterfaceNoLock();
 
 	bodyInterface.SetPositionAndRotation( m_pBody->GetID(), joltPosition, joltRotation, JPH::EActivation::DontActivate );
+
+	// Jolt cannot activate a static body, so moving a game-controlled constraint anchor with
+	// DontActivate otherwise leaves its sleeping dynamic partner at the stale pose. LVS steering
+	// masters use exactly this transition when aligning and restoring wheels.
+	if ( ( bPositionChanged || bRotationChanged ) && m_pBody->IsStatic() )
+		WakeConstrainedDynamicPartners();
 
 	if ( isTeleport || IsStatic() )
 	{
@@ -1578,6 +1587,30 @@ void JoltPhysicsObject::AddDestroyedListener( IJoltObjectDestroyedListener *pLis
 void JoltPhysicsObject::RemoveDestroyedListener( IJoltObjectDestroyedListener *pListener )
 {
 	m_destroyedListeners.FindAndRemove( pListener );
+}
+
+void JoltPhysicsObject::AddConstraint( JoltPhysicsConstraint *pConstraint )
+{
+	if ( !VectorContains( m_pConstraints, pConstraint ) )
+		m_pConstraints.push_back( pConstraint );
+}
+
+void JoltPhysicsObject::RemoveConstraint( JoltPhysicsConstraint *pConstraint )
+{
+	Erase( m_pConstraints, pConstraint );
+}
+
+void JoltPhysicsObject::WakeConstrainedDynamicPartners()
+{
+	for ( JoltPhysicsConstraint *pConstraint : m_pConstraints )
+	{
+		JoltPhysicsObject *pReference = static_cast< JoltPhysicsObject * >( pConstraint->GetReferenceObject() );
+		JoltPhysicsObject *pAttached = static_cast< JoltPhysicsObject * >( pConstraint->GetAttachedObject() );
+		JoltPhysicsObject *pPartner = pReference == this ? pAttached : pReference;
+
+		if ( pPartner && pPartner != this && pPartner->IsMoveable() && pPartner->IsAsleep() )
+			pPartner->Wake();
+	}
 }
 
 void JoltPhysicsObject::AddToPosition( JPH::Vec3Arg addPos )
