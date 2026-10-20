@@ -142,7 +142,7 @@ struct World
 		auto point = body.GetCenterOfMassTransform() * support->GetSupport(direction);
 		return (point.GetZ() - support->GetConvexRadius() - offset.GetZ()) / Unit;
 	}
-	void Step() { system.Update(Dt, 2, &allocator, &jobs); }
+	void Step(int substeps = 2) { system.Update(Dt, substeps, &allocator, &jobs); }
 };
 
 static int checks = 0, failures = 0;
@@ -364,6 +364,101 @@ static void JamTests()
 	}
 }
 
+static void TaperTests()
+{
+	struct Case { float halfAngle; float penetration; bool closed; int substeps = 2; };
+	const Case cases[] = {
+		{0, 1, false}, {1, 1, false}, {2, 1, false}, {5, 1, false},
+		{10, 1, false}, {2, 4, false}, {5, 4, false}, {2, 4, true}, {10, 1, true},
+		{5, 4, true, 1}, {5, 4, true, 4}
+	};
+	for (const Case &test : cases)
+	{
+		World world(0.01f, true);
+		world.vertices.clear();
+		for (float x : {-8.0f, 8.0f})
+			for (float y : {-8.0f, 8.0f})
+				for (float z : {-8.0f, 8.0f})
+					world.vertices.push_back(JPH::Vec3(x, y, z) * Unit);
+		auto &bi = world.system.GetBodyInterface();
+		const float angle = JPH::DegreesToRadians(test.halfAngle);
+		JPH::BodyIDVector walls;
+		for (float side : {-1.0f, 1.0f})
+		{
+			const JPH::Vec3 normal(-side * std::cos(angle), std::sin(angle), 0);
+			const JPH::Vec3 along(side * std::sin(angle), std::cos(angle), 0);
+			const JPH::Vec3 face(side * (8 - test.penetration), 0, 54.5f);
+			JPH::BodyCreationSettings wall(new JPH::BoxShape(JPH::Vec3(4, 32, 55.5f) * Unit),
+				JPH::RVec3((face - 4 * normal + 14 * along) * Unit),
+				JPH::Quat::sRotation(JPH::Vec3::sAxisZ(), -side * angle), JPH::EMotionType::Static, 0);
+			wall.mFriction = 0.8f;
+			walls.push_back(bi.CreateAndAddBody(wall, JPH::EActivation::DontActivate));
+		}
+		if (test.closed)
+		{
+			JPH::BodyCreationSettings wall(new JPH::BoxShape(JPH::Vec3(32, 4, 55.5f) * Unit),
+				JPH::RVec3(0, 14, 54.5f) * Unit, JPH::Quat::sIdentity(), JPH::EMotionType::Static, 0);
+			wall.mFriction = 0.8f;
+			walls.push_back(bi.CreateAndAddBody(wall, JPH::EActivation::DontActivate));
+		}
+		auto &body = world.Hull(8.02f, 0, 30);
+		float firstSleep = -1, maxStep = 0;
+		int wakes = 0, moveTicks = 0;
+		bool wasActive = true;
+		auto previous = body.GetPosition();
+		for (int tick = 1; tick <= 264; ++tick)
+		{
+			world.Step(test.substeps);
+			const float time = tick * Dt;
+			const float step = (body.GetPosition() - previous).Length() / Unit;
+			previous = body.GetPosition();
+			if (time >= 2)
+			{
+				maxStep = std::max(maxStep, step);
+				moveTicks += step > 0.01f;
+			}
+			if (!body.IsActive() && wasActive && firstSleep < 0) firstSleep = time;
+			if (body.IsActive() && !wasActive) ++wakes;
+			wasActive = body.IsActive();
+		}
+		std::printf("taper %.0f deg, overlap %.1f u, closed=%d substeps=%d: asleep=%d first_sleep=%.6f s wakes=%d move_ticks=%d max_step=%.6f u\n",
+			2 * test.halfAngle, test.penetration, test.closed, test.substeps, !body.IsActive(), firstSleep, wakes, moveTicks, maxStep);
+		Check(!body.IsActive() && firstSleep >= 0 && firstSleep <= 3.0f,
+			"tapered or closed gap settles within three seconds");
+		Check(wakes == 0, "tapered or closed gap stays asleep");
+
+		if (test.closed && test.halfAngle == 2 && test.substeps == 2)
+		{
+			auto *motion = body.GetMotionProperties();
+			Check(!motion->CanRecoverContacts(), "deep recovery budget is exhausted");
+			bi.ActivateBody(body.GetID());
+			Check(motion->CanRecoverContacts(), "an actual wake renews the recovery budget");
+			for (int tick = 0; tick < 24; ++tick) world.Step();
+			Check(body.IsActive() && !motion->CanRecoverContacts(),
+				"the next wake has a fresh but bounded recovery interval");
+			bi.ActivateBody(body.GetID());
+			Check(!motion->CanRecoverContacts(),
+				"activating an already active body does not renew recovery");
+
+			JPH::StateRecorderImpl saved;
+			world.system.SaveState(saved);
+			saved.Rewind();
+			Check(world.system.RestoreState(saved) && motion->CanRecoverContacts(),
+				"restoring an active body resets transient recovery state");
+			for (auto id : walls)
+			{
+				bi.RemoveBody(id);
+				bi.DestroyBody(id);
+			}
+			bi.SetPosition(body.GetID(), JPH::RVec3(0, 0, 2 * Unit), JPH::EActivation::DontActivate);
+			bi.SetLinearAndAngularVelocity(body.GetID(), JPH::Vec3::sZero(), JPH::Vec3::sZero());
+			const int ticks = Settle(world, body);
+			Check(!body.IsActive() && ticks * Dt <= 1.5f && world.Bottom(body) >= -0.01f,
+				"restored recovery can resolve a new embedded contact");
+		}
+	}
+}
+
 int main(int argc, char **argv)
 {
 	JPH::RegisterDefaultAllocator();
@@ -374,6 +469,7 @@ int main(int argc, char **argv)
 	{
 		Tests();
 		JamTests();
+		TaperTests();
 		std::printf("%d checks, %d failures\n", checks, failures);
 		result = failures != 0;
 	}

@@ -55,6 +55,21 @@ fixture overlaps two walls by 0.25, 1 and 4 units per side, observes it for
 a fitting-gap control, both walls in one static compound body, and recovery
 after removing one wall and waking the cube.
 
+Each activation also has a one-second cumulative budget for deep static
+recovery, independent of wall angles. Time is charged once per body and
+collision substep, regardless of contact count or position iterations.
+Exhaustion restores ordinary correction and sleep for all of the body's
+recovery contacts until its next actual wake. Contact changes and ordinary
+sleep-test resets do not renew the budget. The transient counter is not
+serialized and starts fresh on restore; no saved bytes are added.
+
+Taper fixtures cover 4-, 10- and 20-degree wall angles, deep overlap, and
+three-wall enclosures with no antiparallel wall pair. They check the
+three-second settling limit and 12-second sleep stability, including one
+and four collision substeps. Lifecycle checks cover renewed recovery after
+sleep, already-active activation calls, and restoring an exhausted active
+body before embedding it in a floor.
+
 For a single diagnostic case, arguments are global Baumgarte, recovery 0/1,
 shape 0/1/2 and yaw in degrees. Shape 0 is the embedded hull; 1 is a thin box;
 2 is a thin tetrahedron at an offset from the world origin. The latter exposes
