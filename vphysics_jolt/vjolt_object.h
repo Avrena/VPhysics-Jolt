@@ -206,6 +206,7 @@ public:
 	float GetVolume() const { return m_flVolume; }
 
 	bool IsControlledByGame() const;
+	bool CanRecoverContactPenetration() const;
 
 	void AddCallbackFlags( uint16 flags ) { m_callbackFlags |= flags; }
 	void RemoveCallbackFlags( uint16 flags ) { m_callbackFlags &= ~flags; }

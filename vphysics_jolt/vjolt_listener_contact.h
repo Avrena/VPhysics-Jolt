@@ -3,6 +3,7 @@
 
 #include "vjolt_controller_fluid.h"
 #include "vjolt_surfaceprops.h"
+#include "vjolt_contact_recovery.h"
 #include "ankerl/unordered_dense.h"
 #include <vector>
 
@@ -71,6 +72,11 @@ public:
 		// If the game says we shouldn't collide, we will treat this as a sensor
 		// to satisfy the StartTouch/EndTouch events.
 		ioSettings.mIsSensor = !bShouldCollide || ioSettings.mIsSensor;
+
+		ConfigureContactRecovery(
+			( inBody1.IsStatic() && pObject1->IsStatic() && pObject2->CanRecoverContactPenetration() )
+			|| ( inBody2.IsStatic() && pObject2->IsStatic() && pObject1->CanRecoverContactPenetration() ),
+			m_PhysicsSystem.GetPhysicsSettings(), ioSettings );
 
 		// Contact-pair data for friction snapshots must accumulate on Added as
 		// well as Persisted: the per-pair map is cleared every step and Jolt
@@ -183,6 +189,11 @@ public:
 		// If the game says we shouldn't collide, we will treat this as a sensor
 		// to satisfy the StartTouch/EndTouch events.
 		ioSettings.mIsSensor = !bShouldCollide || ioSettings.mIsSensor;
+
+		ConfigureContactRecovery(
+			( inBody1.IsStatic() && pObject1->IsStatic() && pObject2->CanRecoverContactPenetration() )
+			|| ( inBody2.IsStatic() && pObject2->IsStatic() && pObject1->CanRecoverContactPenetration() ),
+			m_PhysicsSystem.GetPhysicsSettings(), ioSettings );
 
 		// Sensors don't generate impulses or friction events.
 		if ( ioSettings.mIsSensor )

@@ -1702,6 +1702,22 @@ bool JoltPhysicsObject::IsControlledByGame() const
 	return false;
 }
 
+bool JoltPhysicsObject::CanRecoverContactPenetration() const
+{
+	if ( !m_pBody->IsDynamic() || m_pShadowController || IsControlledByGame()
+		|| !m_pConstraints.empty()
+		|| ( m_gameFlags & ( FVPHYSICS_PLAYER_HELD | FVPHYSICS_PART_OF_RAGDOLL | FVPHYSICS_MULTIOBJECT_ENTITY ) ) )
+		return false;
+
+	// Springs, motion/vehicle/player controllers and fluid controllers register
+	// here too. Only passive air drag is compatible with free-prop recovery.
+	const IJoltObjectDestroyedListener *pDrag = m_pEnvironment->GetDragController();
+	for ( int i = 0; i < m_destroyedListeners.Count(); ++i )
+		if ( m_destroyedListeners[i] != pDrag )
+			return false;
+	return true;
+}
+
 void JoltPhysicsObject::SaveObjectState( JPH::StateRecorder &recorder )
 {
 	m_pBody->SaveState( recorder );
