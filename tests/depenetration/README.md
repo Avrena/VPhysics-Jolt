@@ -45,6 +45,16 @@ correction resolves contacts still deeper than the slop, using the usual maximum
 penetration-distance cap. This correction resets the sleep test. Earlier
 correction retains angular response so thin hulls can align with their contacts.
 
+Deep contacts against nearly opposing static surfaces cannot both be resolved
+by translation. Those contacts use the original slop and correction factor,
+without a sleep veto or translation fallback. Classification uses all contacts
+in an island before solver work is split, and is repeated each substep without
+adding saved state. Other contacts retain recovery. The compact 16-unit cube
+fixture overlaps two walls by 0.25, 1 and 4 units per side, observes it for
+12 seconds, and checks sleep, wakes and motion after 2 seconds. It also checks
+a fitting-gap control, both walls in one static compound body, and recovery
+after removing one wall and waking the cube.
+
 For a single diagnostic case, arguments are global Baumgarte, recovery 0/1,
 shape 0/1/2 and yaw in degrees. Shape 0 is the embedded hull; 1 is a thin box;
 2 is a thin tetrahedron at an offset from the world origin. The latter exposes

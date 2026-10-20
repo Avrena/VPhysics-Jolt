@@ -7,6 +7,7 @@
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
+#include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/StateRecorderImpl.h>
 #include <cstdio>
 #include <cstdlib>
@@ -106,7 +107,7 @@ struct World
 		system.GetBodyInterface().RemoveBodies(bodies.data(), int(bodies.size()));
 		system.GetBodyInterface().DestroyBodies(bodies.data(), int(bodies.size()));
 	}
-	JPH::Body &Hull(float height = 0.0f, float yaw = 0.0f)
+	JPH::Body &Hull(float height = 0.0f, float yaw = 0.0f, float mass = 12.0f)
 	{
 		JPH::ConvexHullShapeSettings hull(vertices, 0.0625f * Unit);
 		hull.mHullTolerance = 0.0f;
@@ -116,7 +117,7 @@ struct World
 			JPH::Quat::sRotation(JPH::Vec3::sAxisZ(), JPH::DegreesToRadians(yaw)), JPH::EMotionType::Dynamic, 0);
 		settings.mMotionQuality = JPH::EMotionQuality::LinearCast;
 		settings.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
-		settings.mMassPropertiesOverride.mMass = 12;
+		settings.mMassPropertiesOverride.mMass = mass;
 		settings.mFriction = 0.8f;
 		settings.mRestitution = 0.0f;
 		settings.mLinearDamping = settings.mAngularDamping = 0.1f;
@@ -276,6 +277,93 @@ static void Tests()
 	Check(!sensor.mKeepAwakeForPenetration, "zero slop does not require exact floating point convergence to sleep");
 }
 
+static void JamTests()
+{
+	struct Case { float penetration; bool combinedWalls; };
+	const Case cases[] = {{-0.5f, false}, {0.25f, false}, {1.0f, false}, {4.0f, false}, {1.0f, true}};
+	for (const Case &test : cases)
+	{
+		const float penetration = test.penetration;
+		World world(0.01f, true);
+		world.vertices.clear();
+		for (float x : {-8.0f, 8.0f})
+			for (float y : {-8.0f, 8.0f})
+				for (float z : {-8.0f, 8.0f})
+					world.vertices.push_back(JPH::Vec3(x, y, z) * Unit);
+
+		auto &bi = world.system.GetBodyInterface();
+		const float halfGap = (8.0f - penetration) * Unit;
+		JPH::BodyID rightWall;
+		JPH::StaticCompoundShapeSettings combined;
+		for (float sign : {-1.0f, 1.0f})
+		{
+			const JPH::Vec3 position(sign * (halfGap + 8 * Unit), 0, 32 * Unit);
+			auto *shape = new JPH::BoxShape(JPH::Vec3(8, 64, 64) * Unit);
+			if (test.combinedWalls)
+			{
+				combined.AddShape(position, JPH::Quat::sIdentity(), shape);
+				continue;
+			}
+			JPH::BodyCreationSettings wall(shape, JPH::RVec3(position),
+				JPH::Quat::sIdentity(), JPH::EMotionType::Static, 0);
+			wall.mFriction = 0.8f;
+			auto id = bi.CreateAndAddBody(wall, JPH::EActivation::DontActivate);
+			if (sign > 0) rightWall = id;
+		}
+		if (test.combinedWalls)
+		{
+			auto shape = combined.Create();
+			if (shape.HasError()) { std::fprintf(stderr, "%s\n", shape.GetError().c_str()); std::exit(2); }
+			JPH::BodyCreationSettings walls(shape.Get(), JPH::RVec3::sZero(),
+				JPH::Quat::sIdentity(), JPH::EMotionType::Static, 0);
+			walls.mFriction = 0.8f;
+			bi.CreateAndAddBody(walls, JPH::EActivation::DontActivate);
+		}
+		auto &body = world.Hull(8.02f, 0.0f, 30.0f);
+		float firstSleep = -1, maxStep = 0;
+		int wakes = 0, moveTicks = 0;
+		bool wasActive = true;
+		auto previous = body.GetPosition();
+		for (int tick = 1; tick <= 264; ++tick)
+		{
+			world.Step();
+			const float time = tick * Dt;
+			const float step = (body.GetPosition() - previous).Length() / Unit;
+			previous = body.GetPosition();
+			if (time >= 2.0f)
+			{
+				maxStep = std::max(maxStep, step);
+				moveTicks += step > 0.01f;
+			}
+			if (!body.IsActive() && wasActive && firstSleep < 0) firstSleep = time;
+			if (body.IsActive() && !wasActive) ++wakes;
+			wasActive = body.IsActive();
+		}
+		std::printf("cube gap penetration %.2f u, combined_walls=%d: asleep=%d first_sleep=%.6f s wakes=%d move_ticks=%d max_step=%.6f u\n",
+			penetration, test.combinedWalls, !body.IsActive(), firstSleep, wakes, moveTicks, maxStep);
+		Check(!body.IsActive() && firstSleep >= 0 && firstSleep <= (penetration > 0? 4.0f : 1.5f),
+			"cube between static walls settles and remains asleep");
+		Check(wakes == 0 && moveTicks == 0 && maxStep <= 0.01f,
+			"blocked recovery does not keep twitching");
+
+		if (penetration == 1.0f && !test.combinedWalls)
+		{
+			// Classification is transient: removing a wall must restore useful
+			// recovery when the body wakes, including persisted contact callbacks.
+			bi.RemoveBody(rightWall);
+			bi.DestroyBody(rightWall);
+			bi.ActivateBody(body.GetID());
+			const int ticks = Settle(world, body);
+			float minX = 1.0e20f;
+			for (auto vertex : world.vertices)
+				minX = std::min(minX, (body.GetWorldTransform() * vertex).GetX());
+			Check(!body.IsActive() && ticks * Dt <= 1.5f
+				&& minX >= -halfGap - 0.01f * Unit && world.Bottom(body) >= -0.01f,
+				"removing an opposing wall re-enables recovery after wake");
+		}
+	}
+}
+
 int main(int argc, char **argv)
 {
 	JPH::RegisterDefaultAllocator();
@@ -285,6 +373,7 @@ int main(int argc, char **argv)
 	if (argc == 1)
 	{
 		Tests();
+		JamTests();
 		std::printf("%d checks, %d failures\n", checks, failures);
 		result = failures != 0;
 	}
