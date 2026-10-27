@@ -23,3 +23,8 @@ ConVar vjolt_contact_estimate( "vjolt_contact_estimate", "1", FCVAR_NONE,
 // touch-damage territory.
 ConVar vjolt_shadow_collision_min_speed( "vjolt_shadow_collision_min_speed", "150", FCVAR_NONE,
 	"Min approach speed (u/s) for player-shadow collision events. 0 = emit all (stock behavior)." );
+
+ConVar vjolt_collision_min_speed( "vjolt_collision_min_speed", "0", FCVAR_NONE,
+	"Min contact approach speed (u/s) for ordinary collision callbacks." );
+ConVar vjolt_collision_max_events( "vjolt_collision_max_events", "4096", FCVAR_NONE,
+	"Global collision callback safety limit per simulation frame; per-object performance limits also apply." );

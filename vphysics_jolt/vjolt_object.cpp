@@ -21,6 +21,7 @@
 
 #include "vjolt_object.h"
 #include "vjolt_constraints.h"
+#include <Jolt/Physics/Collision/Shape/DecoratedShape.h>
 
 // memdbgon must be the last include file in a .cpp file!!!
 #include "tier0/memdbgon.h"
@@ -1877,6 +1878,19 @@ void JoltPhysicsObject::RecomputeDrag()
 	if ( IsStatic() || !GetCollide() )
 		return;
 
+	// A sphere has no polygon drag surface in stock VPhysics, even after
+	// EnableDrag(true) or a coefficient setter. Preserve that zero basis through
+	// mass changes and center-of-mass decorators as well.
+	const JPH::Shape *pShape = m_pBody->GetShape();
+	while ( pShape->GetType() == JPH::EShapeType::Decorated )
+		pShape = static_cast< const JPH::DecoratedShape * >( pShape )->GetInnerShape();
+	if ( pShape->GetSubType() == JPH::EShapeSubType::Sphere )
+	{
+		m_vDragBasis = JPH::Vec3::sZero();
+		m_vAngDragBasis = JPH::Vec3::sZero();
+		return;
+	}
+
 	// AABB in Source space; convert delta to Jolt space (m). Area fractions are unitless,
 	// in [0,1], populated from compactsurfaceheader_t::dragAxisAreas at .phy load time.
 	// CollideGetOrthographicAreas guarantees (1,1,1) when no precomputed value exists.
@@ -1915,18 +1929,17 @@ float JoltPhysicsObject::GetDragInDirection( JPH::Vec3Arg vWorldVelocity ) const
 	// the local-space drag basis. Mirrors IVP's m_world_f_core->vimult3.
 	const JPH::Vec3 vLocal = m_pBody->GetRotation().Conjugated() * vWorldVelocity;
 
-	// NB: operator-precedence matches IVP/Source -- the linear coefficient applies
-	// only to the X term. Preserved verbatim to match upstream drag intensity.
-	return m_flLinearDragCoefficient * fabsf( vLocal.GetX() * m_vDragBasis.GetX() )
+	// GMod scales the complete projected area, including the local Y/Z terms.
+	return m_flLinearDragCoefficient * ( fabsf( vLocal.GetX() * m_vDragBasis.GetX() )
 		+ fabsf( vLocal.GetY() * m_vDragBasis.GetY() )
-		+ fabsf( vLocal.GetZ() * m_vDragBasis.GetZ() );
+		+ fabsf( vLocal.GetZ() * m_vDragBasis.GetZ() ) );
 }
 
 float JoltPhysicsObject::GetAngularDragInDirection( JPH::Vec3Arg vLocalAngularVelocity ) const
 {
-	return m_flAngularDragCoefficient * fabsf( vLocalAngularVelocity.GetX() * m_vAngDragBasis.GetX() )
+	return m_flAngularDragCoefficient * ( fabsf( vLocalAngularVelocity.GetX() * m_vAngDragBasis.GetX() )
 		+ fabsf( vLocalAngularVelocity.GetY() * m_vAngDragBasis.GetY() )
-		+ fabsf( vLocalAngularVelocity.GetZ() * m_vAngDragBasis.GetZ() );
+		+ fabsf( vLocalAngularVelocity.GetZ() * m_vAngDragBasis.GetZ() ) );
 }
 
 #if GAME_GMOD

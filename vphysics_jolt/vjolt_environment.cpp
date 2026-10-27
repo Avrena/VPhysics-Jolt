@@ -284,6 +284,7 @@ JoltPhysicsEnvironment::JoltPhysicsEnvironment()
 
 	m_pDragController = new JoltPhysicsDragController();
 	m_PhysicsSystem.AddStepListener( m_pDragController );
+	m_PhysicsSystem.AddStepListener( &m_ContactListener );
 }
 
 JoltPhysicsEnvironment::~JoltPhysicsEnvironment()
@@ -302,6 +303,7 @@ JoltPhysicsEnvironment::~JoltPhysicsEnvironment()
 		RemoveBodyAndDeleteObject( pObject );
 	}
 
+	m_PhysicsSystem.RemoveStepListener( &m_ContactListener );
 	m_PhysicsSystem.RemoveStepListener( m_pDragController );
 	delete m_pDragController;
 	m_pDragController = nullptr;
@@ -448,6 +450,9 @@ IPhysicsObject *JoltPhysicsEnvironment::CreatePolyObjectStatic( const CPhysColli
 IPhysicsObject *JoltPhysicsEnvironment::CreateSphereObject( float radius, int materialIndex, const Vector &position, const QAngle &angles, objectparams_t *pParams, bool isStatic )
 {
 	objectparams_t params = NormalizeObjectParams( pParams );
+	// Stock spheres have no polygon drag basis and start with both coefficients
+	// zero. Explicit coefficient setters can subsequently enable the controller.
+	params.dragCoefficient = 0.0f;
 
 	Vector vSanePosition = position;
 	QAngle qSaneAngles = angles;
@@ -948,7 +953,7 @@ void JoltPhysicsEnvironment::Simulate( float deltaTime )
 		AdvanceContactDataTick();
 		m_PhysicsSystem.Update( deltaTime, nCollisionSubSteps, tempAllocator, jobSystem );
 	}
-	m_ContactListener.FlushCallbacks();
+	m_ContactListener.FlushCallbacks( m_PerformanceParams.maxCollisionsPerObjectPerTimestep );
 
 	for ( size_t i = 0, n = m_pConstraints.size(); i < n; ++i )
 		m_pConstraints[i]->PostSimulate();

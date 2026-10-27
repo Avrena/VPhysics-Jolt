@@ -6,11 +6,16 @@
 #include "vjolt_contact_recovery.h"
 #include "ankerl/unordered_dense.h"
 #include <vector>
+#include <algorithm>
+#include <tuple>
+#include <Jolt/Physics/PhysicsStepListener.h>
 
 #include <Jolt/Physics/Collision/EstimateCollisionResponse.h>
 
 extern ConVar vjolt_contact_estimate;
 extern ConVar vjolt_shadow_collision_min_speed;
+extern ConVar vjolt_collision_min_speed;
+extern ConVar vjolt_collision_max_events;
 
 #if GAME_GMOD
 // Defined in vjolt_object.cpp. Returns true iff pObject is still in the live-object registry
@@ -50,7 +55,7 @@ enum VPhysicsGameFlags : uint32
 	FVPHYSICS_NO_SELF_COLLISIONS	= 0x8000,
 };
 
-class JoltPhysicsContactListener final : public JPH::ContactListener
+class JoltPhysicsContactListener final : public JPH::ContactListener, public JPH::PhysicsStepListener
 {
 public:
 	JoltPhysicsContactListener( JPH::PhysicsSystem &physicsSystem )
@@ -123,57 +128,22 @@ public:
 
 		if ( bIsCollision || bIsShadowCollision )
 		{
-			// Josh:
-			// We know ahead of time what this is used for (playing sounds and such)
-			// and it is not easily threadable
-			// (unlike the StartTouch objects which we can get away as long as the objects themselves aren't concurrent it seems)
-			// To avoid this causing locks and therefore lagging with many objects,
-			// we can just know ahead of time what is going to cause a sound to play, which is
-			// hardcoded at speed > 70.0f and deltaTime < 0.05 (the latter of which we don't track)
-			// So we can just avoid sending these PreCollision in this case.
-
-			const Vector vecCollideNormal = Vector( inManifold.mWorldSpaceNormal.GetX(), inManifold.mWorldSpaceNormal.GetY(), inManifold.mWorldSpaceNormal.GetZ() );
-			const float flCollisionSpeed = JoltPhysicsCollisionEvent::GetCollisionSpeed( pObject1, pObject2, vecCollideNormal );
-
-			// Skip impact reporting when either body is currently held by the player.
-			// The physgun's shadow controller drives the held body into the contact
-			// every tick; under IVP this would resolve to zero relative velocity at
-			// the contact (run-to-convergence), but Jolt's fixed-iteration solver
-			// leaves residual velocity that the engine reads as a "real" impact and
-			// triggers camera shake / impact sounds for what is really player input.
+			const JoltPhysicsCollisionInfo info( pObject1, pObject2, inManifold );
+			const float flCollisionSpeed = Max( 0.0f, -info.m_ContactSpeed.Dot( info.m_SurfaceNormal ) );
 			const bool bHeldByPlayer =
 				( pObject1->GetGameFlags() & FVPHYSICS_PLAYER_HELD ) ||
 				( pObject2->GetGameFlags() & FVPHYSICS_PLAYER_HELD );
 
-			const bool bHasSound =
-				flCollisionSpeed >= 70.0f &&
-				!bHeldByPlayer &&
-				pObject1->GetGameMaterialAllowsSounds() &&
-				pObject2->GetGameMaterialAllowsSounds();
-
-			const bool bSane = m_GlobalCollisionEventCount < MaxCollisionEvents;
-
-			// Shadow-pair events (player vs prop) bypass the sound-speed gate and the event
-			// cap because the game needs them for impact damage -- but Jolt re-adds
-			// manifolds every few ticks for moving contacts, so a player standing against a
-			// prop otherwise emits full impact events at rub speed. Gate on the pair's
-			// approach speed: player impact damage thresholds start around ~300 u/s, so a
-			// server can set the convar there and "player rubs prop" emits nothing while
-			// "prop flies into player" still hurts. Default 0 preserves stock behavior.
-			const bool bSendCollisionCallback = ( bHasSound && bSane ) ||
-				( bIsShadowCollision && flCollisionSpeed >= vjolt_shadow_collision_min_speed.GetFloat() );
-
+			// Ordinary callbacks carry gameplay data even for quiet materials. Apply
+			// delivery budgets after sorting the queued events, not on worker threads.
+			// Keep the player-shadow gate based on the effective linear velocity;
+			// shadow correction and angular motion must not bypass that safeguard.
+			const Vector vecNormal = -info.m_SurfaceNormal;
+			const bool bSendCollisionCallback = bIsShadowCollision
+				? JoltPhysicsCollisionEvent::GetCollisionSpeed( pObject1, pObject2, vecNormal ) >= vjolt_shadow_collision_min_speed.GetFloat()
+				: bIsCollision && !bHeldByPlayer && flCollisionSpeed >= Max( 0.0f, vjolt_collision_min_speed.GetFloat() );
 			if ( bSendCollisionCallback )
-			{
-				// IVP reports the time since this specific pair last collided, and the
-				// game's impact damage code uses small deltas to discount repeated hits
-				// from a sustained contact. The previous hardcoded 100.0 made every
-				// manifold re-add look like a fresh full-energy impact.
-				m_CollisionEvents.EmplaceBack( GetThreadId(),
-					JoltPhysicsCollisionInfo( pObject1, pObject2, inManifold ),
-					StampPairCollisionTime( pObject1, pObject2 ) );
-				m_GlobalCollisionEventCount++;
-			}
+				m_CollisionEvents.EmplaceBack( GetThreadId(), info, m_nCollisionSubstep );
 		}
 
 		if ( ShouldTouchCallback( pObject1, pObject2 ) )
@@ -551,10 +521,20 @@ public:
 		return false;
 	}
 
-	void FlushCallbacks()
+	// Jolt completes step listeners before collision jobs. Capture the substep
+	// ordinal to keep chronological order independent of worker scheduling.
+	void OnStep( const JPH::PhysicsStepListenerContext & ) override
+	{
+		++m_nCollisionSubstep;
+	}
+
+	void FlushCallbacks( int nMaxCollisionsPerObject )
 	{
 		if ( !m_pGameListener )
+		{
+			m_nCollisionSubstep = 0;
 			return;
+		}
 
 	#if GAME_GMOD
 		// Snapshot the destroy generation once per flush. The per-event guard below only does the
@@ -580,7 +560,19 @@ public:
 		// Post in stock, unchanged). No Source contract orders StartTouch vs PostCollision (IVP
 		// interleaves per contact), so this is benign -- but it moves a Post-callback free ahead of the
 		// StartTouch family, which is why EVERY dispatch loop below carries the same validity guard.
-		m_CollisionEvents.ForEach< true >( [ this ]( JoltPhysicsCollisionEvent& event )
+		auto &events = m_OrderedCollisionEvents;
+		events.clear();
+		m_CollisionEvents.ForEach< false >( [&events]( JoltPhysicsCollisionEvent &event ) { events.push_back( &event ); } );
+		std::sort( events.begin(), events.end(), []( const auto *a, const auto *b )
+		{
+			return a->SortKey() < b->SortKey();
+		} );
+		auto &objectCounts = m_CollisionObjectCounts;
+		objectCounts.clear();
+		uint32 nEmitted = 0;
+		const uint32 nPerObjectLimit = static_cast< uint32 >( Max( 1, nMaxCollisionsPerObject ) );
+		const uint32 nGlobalLimit = static_cast< uint32 >( Max( 1, vjolt_collision_max_events.GetInt() ) );
+		auto dispatch = [ this, &objectCounts, &nEmitted, nPerObjectLimit, nGlobalLimit ]( JoltPhysicsCollisionEvent& event )
 		{
 			JoltPhysicsObject *pObj1 = event.m_Data.GetPair().pObject1;
 			JoltPhysicsObject *pObj2 = event.m_Data.GetPair().pObject2;
@@ -593,22 +585,18 @@ public:
 			if ( ShouldSkipFreedEvent( pObj1, pObj2 ) )
 				return;
 
-			// Compute collisionSpeed from the post-resolution body velocities (matches IVP's
-			// contact->speed semantics: relative velocity at the contact surface after impulses).
-			// Player-controlled sides substitute the CONTACT-TIME game-driven velocity stored in
-			// the event (the live body velocity is the shadow-correction spike, and the controller
-			// may already be detached/zeroed by an earlier callback in this same flush).
-			Vector vel1, vel2, normal;
-			if ( event.m_Data.IsObject1PlayerDriven() )
-				vel1 = JoltToSource::Distance( event.m_Data.GetObject1PreCollisionVelocity() );
-			else
-				pObj1->GetVelocity( &vel1, nullptr );
-			if ( event.m_Data.IsObject2PlayerDriven() )
-				vel2 = JoltToSource::Distance( event.m_Data.GetObject2PreCollisionVelocity() );
-			else
-				pObj2->GetVelocity( &vel2, nullptr );
-			event.m_Data.GetSurfaceNormal( normal );
-			event.m_Event.collisionSpeed = fabsf( ( vel1 - vel2 ).Dot( normal ) );
+			if ( nEmitted >= nGlobalLimit )
+				return;
+			const uint32 id1 = pObj1->GetBodyID().GetIndexAndSequenceNumber();
+			const uint32 id2 = pObj2->GetBodyID().GetIndexAndSequenceNumber();
+			// Static bodies (especially the world) must not consume a shared budget.
+			if ( ( !pObj1->IsStatic() && objectCounts[id1] >= nPerObjectLimit ) ||
+				 ( !pObj2->IsStatic() && objectCounts[id2] >= nPerObjectLimit ) )
+				return;
+			if ( !pObj1->IsStatic() ) ++objectCounts[id1];
+			if ( !pObj2->IsStatic() ) ++objectCounts[id2];
+			++nEmitted;
+			event.m_Event.deltaCollisionTime = StampPairCollisionTime( pObj1, pObj2 );
 
 			// Fake the velocities for both objects during PreCollision so the game gets a proper
 			// Pre/Post delta for damage callbacks.
@@ -640,7 +628,10 @@ public:
 				pObj1->RestoreJoltLinearVelocity( realVel1 );
 			if ( bFake2 )
 				pObj2->RestoreJoltLinearVelocity( realVel2 );
-		});
+		};
+		for ( auto *event : events )
+			dispatch( *event );
+		m_CollisionEvents.ForEach< true >( []( JoltPhysicsCollisionEvent & ) {} );
 
 		// Send StartTouch events
 		m_StartTouchEvents.ForEach< true >( [ this ]( JoltPhysicsCollisionData& event )
@@ -714,8 +705,7 @@ public:
 			m_pGameListener->FluidEndTouch( event.pObject2, event.pObject1->GetFluidController() );
 		});
 
-		// Reset the collision event counter.
-		m_GlobalCollisionEventCount = 0u;
+		m_nCollisionSubstep = 0;
 	}
 
 	void PostSimulationFrame()
@@ -763,17 +753,21 @@ private:
 		return pObject->GetBody()->GetLinearVelocity();
 	}
 
+	static JPH::Vec3 GetEffectivePointVelocity( JoltPhysicsObject *pObject, JPH::RVec3Arg point )
+	{
+		if ( pObject->GetCallbackFlags() & CALLBACK_IS_PLAYER_CONTROLLER )
+			return SourceToJolt::Distance( pObject->GetPlayerDrivenVelocity() );
+		return pObject->GetBody()->GetPointVelocity( point );
+	}
+
 	// Returns the time in seconds since this pair last produced a collision event (IVP
 	// deltaCollisionTime semantics) and stamps 'now' for the next one. A pair's first event
-	// reports "long ago" (100.0, matching the engine's out-of-range sentinel). Runs on Jolt
-	// worker threads via OnContactAdded; emitted events are few (sound cap + shadow speed
-	// gate), so the lock is quiet.
+	// reports 1.0, and later intervals have the same ceiling. Stamp only admitted
+	// events on the dispatch thread, so dropped events do not alter the next delta.
 	float StampPairCollisionTime( JoltPhysicsObject *pObject1, JoltPhysicsObject *pObject2 )
 	{
 		const uint64_t nKey = MakeCacheKey( pObject1, pObject2 );
 		const uint64_t nNowUs = m_nSimulationTimeUs.load( std::memory_order_relaxed );
-
-		std::unique_lock lock( m_CollisionTimeLock );
 
 		// Stale entries for destroyed bodies accumulate (recycled BodyIDs carry a new
 		// sequence number and never revisit an old key); reset wholesale rather than
@@ -781,11 +775,11 @@ private:
 		if ( m_LastCollisionTime.size() > 16384 )
 			m_LastCollisionTime.clear();
 
-		float flDelta = 100.0f;
+		float flDelta = 1.0f;
 		auto it = m_LastCollisionTime.find( nKey );
 		if ( it != m_LastCollisionTime.end() )
 		{
-			flDelta = static_cast< float >( nNowUs - it->second ) * 1e-6f;
+			flDelta = Min( 1.0f, static_cast< float >( nNowUs - it->second ) * 1e-6f );
 			it->second = nNowUs;
 		}
 		else
@@ -822,7 +816,6 @@ private:
 	ankerl::unordered_dense::map< uint64_t, bool > m_ShouldCollideCache;
 
 	// Per-pair last-collision-event stamps for deltaCollisionTime (see StampPairCollisionTime).
-	std::mutex m_CollisionTimeLock;
 	ankerl::unordered_dense::map< uint64_t, uint64_t > m_LastCollisionTime;
 	std::atomic< uint64_t > m_nSimulationTimeUs = { 0ull };
 
@@ -839,8 +832,11 @@ private:
 			// Slart: Note this negated vector, it is important, Portal 2 bouncy paint needs it negated otherwise things fly into the surface they hit
 			, m_SurfaceNormal( -Vector( inManifold.mWorldSpaceNormal.GetX(), inManifold.mWorldSpaceNormal.GetY(), inManifold.mWorldSpaceNormal.GetZ() ) )
 			, m_ContactPoint( JoltToSource::Distance( inManifold.GetWorldSpaceContactPointOn1( 0 ) ) )
-			// Unused...
-			, m_ContactSpeed( vec3_origin )
+			, m_ContactSpeed( JoltToSource::Distance(
+				GetEffectivePointVelocity( pObject1, inManifold.GetWorldSpaceContactPointOn1( 0 ) ) -
+				GetEffectivePointVelocity( pObject2, inManifold.GetWorldSpaceContactPointOn2( 0 ) ) ) )
+			, m_PairKey( MakeCacheKey( pObject1, pObject2 ) )
+			, m_SubShapeKey( ( uint64_t( inManifold.mSubShapeID1.GetValue() ) << 32 ) | inManifold.mSubShapeID2.GetValue() )
 			// Pre-collision velocities as the game will see them via PreCollision's
 			// velocity faking: player-controlled sides report the game-driven velocity,
 			// not the shadow-correction spike (see GetEffectiveJoltVelocity). The
@@ -861,6 +857,8 @@ private:
 		Vector m_SurfaceNormal = vec3_origin;
 		Vector m_ContactPoint  = vec3_origin;
 		Vector m_ContactSpeed  = vec3_origin;
+		uint64_t m_PairKey = 0;
+		uint64_t m_SubShapeKey = 0;
 
 		JPH::Vec3 m_Velocity0 = JPH::Vec3::sZero();
 		JPH::Vec3 m_Velocity1 = JPH::Vec3::sZero();
@@ -917,6 +915,11 @@ private:
 		{
 			return m_CollisionData.m_bPlayerDriven1;
 		}
+
+		const JoltPhysicsCollisionInfo &GetInfo() const
+		{
+			return m_CollisionData;
+		}
 	private:
 		JoltPhysicsCollisionInfo m_CollisionData;
 	};
@@ -924,8 +927,8 @@ private:
 	class JoltPhysicsCollisionEvent
 	{
 	public:
-		JoltPhysicsCollisionEvent( const JoltPhysicsCollisionInfo &info, float flDeltaCollisionTime = 100.0f )
-			: m_Data{ info }
+		JoltPhysicsCollisionEvent( const JoltPhysicsCollisionInfo &info, uint32 nSubstep )
+			: m_Data{ info }, m_nSubstep( nSubstep )
 		{
 			JoltPhysicsObject *pObject1 = m_Data.GetPair().pObject1;
 			JoltPhysicsObject* pObject2 = m_Data.GetPair().pObject2;
@@ -936,14 +939,15 @@ private:
 			m_Event.surfaceProps[1]		= pObject2->GetMaterialIndex();
 			m_Event.isCollision			= IsCollision( pObject1, pObject2 );
 			m_Event.isShadowCollision	= IsShadowCollision( pObject1, pObject2 );
-			m_Event.deltaCollisionTime	= flDeltaCollisionTime;
-			m_Event.collisionSpeed		= 0.0f;
+			m_Event.deltaCollisionTime	= 1.0f;
+			m_Event.collisionSpeed		= Max( 0.0f, -info.m_ContactSpeed.Dot( info.m_SurfaceNormal ) );
 			m_Event.pInternalData		= &m_Data;
 		}
 
 		JoltPhysicsCollisionEvent( const JoltPhysicsCollisionEvent &other )
 			: m_Event( other.m_Event )
 			, m_Data ( other.m_Data )
+			, m_nSubstep( other.m_nSubstep )
 		{
 			// Re-target the event's internal data pointer to our own structure.
 			m_Event.pInternalData = &m_Data;
@@ -952,6 +956,7 @@ private:
 		JoltPhysicsCollisionEvent( JoltPhysicsCollisionEvent &&other )
 			: m_Event( std::move( other.m_Event ) )
 			, m_Data ( std::move( other.m_Data ) )
+			, m_nSubstep( other.m_nSubstep )
 		{
 			// Re-target the event's internal data pointer to our own structure.
 			m_Event.pInternalData = &m_Data;
@@ -982,8 +987,21 @@ private:
 			return fabsf( vecCollisionSpeed.Dot( vecNormal ) );
 		}
 
+		auto SortKey() const
+		{
+			// Highest approach speed first within a pair/substep, then stable shape
+			// and geometry keys. No addresses or worker IDs influence admission.
+			const auto &info = m_Data.GetInfo();
+			return std::make_tuple( m_nSubstep, info.m_PairKey, -m_Event.collisionSpeed,
+				info.m_SubShapeKey, info.m_ContactPoint.x, info.m_ContactPoint.y, info.m_ContactPoint.z,
+				info.m_SurfaceNormal.x, info.m_SurfaceNormal.y, info.m_SurfaceNormal.z,
+				info.m_ContactSpeed.x, info.m_ContactSpeed.y, info.m_ContactSpeed.z,
+				info.m_Velocity0.GetX(), info.m_Velocity0.GetY(), info.m_Velocity0.GetZ(),
+				info.m_Velocity1.GetX(), info.m_Velocity1.GetY(), info.m_Velocity1.GetZ() );
+		}
 		vcollisionevent_t			m_Event = {};
 		JoltPhysicsCollisionData	m_Data;
+		uint32 m_nSubstep;
 	};
 
 	class JoltPhysicsFrictionEvent
@@ -1013,9 +1031,11 @@ private:
 		template < bool bClear, typename FuncType >
 		void ForEach( FuncType func )
 		{
-			for ( uint32 thread = m_Mask; thread; thread &= thread - 1 )
+			for ( uint64_t thread = m_Mask; thread; thread &= thread - 1 )
 			{
-				const uint32 i = JPH::CountTrailingZeros( thread );
+				const uint32 low = static_cast< uint32 >( thread );
+				const uint32 i = low ? JPH::CountTrailingZeros( low )
+					: 32 + JPH::CountTrailingZeros( static_cast< uint32 >( thread >> 32 ) );
 				for ( auto &event : m_Events[ i ] )
 					func( event );
 
@@ -1033,11 +1053,9 @@ private:
 		std::vector< Data >		m_Events[ kMaxThreads ];
 	};
 
-	// The maximum number of sent collision events to send per-frame.
-	// This is used to play stuff like sounds and physics fx.
-	// This is quite expensive to do so, we rate-limit this quite aggressively.
-	static constexpr uint32_t MaxCollisionEvents = 4;
-	std::atomic< uint32 > m_GlobalCollisionEventCount = { 0u };
+	uint32 m_nCollisionSubstep = 0;
+	std::vector< JoltPhysicsCollisionEvent * > m_OrderedCollisionEvents;
+	ankerl::unordered_dense::map< uint32, uint32 > m_CollisionObjectCounts;
 
 	JoltPhysicsEventTracker< JoltPhysicsCollisionEvent >	m_CollisionEvents;
 	JoltPhysicsEventTracker< JoltPhysicsFrictionEvent >		m_FrictionEvents;
