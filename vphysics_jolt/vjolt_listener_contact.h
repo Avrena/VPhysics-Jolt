@@ -8,6 +8,7 @@
 #include <vector>
 #include <algorithm>
 #include <tuple>
+#include <cstring>
 #include <Jolt/Physics/PhysicsStepListener.h>
 
 #include <Jolt/Physics/Collision/EstimateCollisionResponse.h>
@@ -128,7 +129,7 @@ public:
 
 		if ( bIsCollision || bIsShadowCollision )
 		{
-			const JoltPhysicsCollisionInfo info( pObject1, pObject2, inManifold );
+			const JoltPhysicsCollisionInfo info( pObject1, pObject2, inManifold, true );
 			const float flCollisionSpeed = Max( 0.0f, -info.m_ContactSpeed.Dot( info.m_SurfaceNormal ) );
 			const bool bHeldByPlayer =
 				( pObject1->GetGameFlags() & FVPHYSICS_PLAYER_HELD ) ||
@@ -139,9 +140,9 @@ public:
 			// Keep the player-shadow gate based on the effective linear velocity;
 			// shadow correction and angular motion must not bypass that safeguard.
 			const Vector vecNormal = -info.m_SurfaceNormal;
-			const bool bSendCollisionCallback = bIsShadowCollision
+			const bool bSendCollisionCallback = info.IsFinite() && ( bIsShadowCollision
 				? JoltPhysicsCollisionEvent::GetCollisionSpeed( pObject1, pObject2, vecNormal ) >= vjolt_shadow_collision_min_speed.GetFloat()
-				: bIsCollision && !bHeldByPlayer && flCollisionSpeed >= Max( 0.0f, vjolt_collision_min_speed.GetFloat() );
+				: bIsCollision && !bHeldByPlayer && IsOrdinaryImpact( flCollisionSpeed, vjolt_collision_min_speed.GetFloat() ) );
 			if ( bSendCollisionCallback )
 				m_CollisionEvents.EmplaceBack( GetThreadId(), info, m_nCollisionSubstep );
 		}
@@ -561,8 +562,7 @@ public:
 		// interleaves per contact), so this is benign -- but it moves a Post-callback free ahead of the
 		// StartTouch family, which is why EVERY dispatch loop below carries the same validity guard.
 		auto &events = m_OrderedCollisionEvents;
-		events.clear();
-		m_CollisionEvents.ForEach< false >( [&events]( JoltPhysicsCollisionEvent &event ) { events.push_back( &event ); } );
+		m_CollisionEvents.CollectValid( events );
 		std::sort( events.begin(), events.end(), []( const auto *a, const auto *b )
 		{
 			return a->SortKey() < b->SortKey();
@@ -726,6 +726,31 @@ public:
 	}
 
 private:
+	// Bit classification remains valid with finite-math compiler optimizations.
+	// The integer key is a total IEEE-754 order, including signed zero, infinities
+	// and NaN payloads; no floating comparison can violate std::sort's contract.
+	static uint32 FloatOrderKey( float value )
+	{
+		uint32 bits;
+		std::memcpy( &bits, &value, sizeof( bits ) );
+		return bits & 0x80000000u ? ~bits : bits ^ 0x80000000u;
+	}
+
+	static bool IsFiniteValue( float value )
+	{
+		uint32 bits;
+		std::memcpy( &bits, &value, sizeof( bits ) );
+		return ( bits & 0x7f800000u ) != 0x7f800000u;
+	}
+
+	static bool IsOrdinaryImpact( float approachSpeed, float configuredFloor )
+	{
+		// A zero user floor still excludes separating and numerically stationary
+		// manifold re-adds. Such events must neither slow scripts nor stamp pair time.
+		return IsFiniteValue( approachSpeed ) && approachSpeed > 0.01f
+			&& approachSpeed >= Max( 0.0f, configuredFloor );
+	}
+
 
 	// Velocity as collision events should report it. For player-controlled objects the
 	// body's velocity is the shadow controller's correction term ((target - pos) / dt),
@@ -827,7 +852,7 @@ private:
 		{
 		}
 
-		JoltPhysicsCollisionInfo( JoltPhysicsObject *pObject1, JoltPhysicsObject *pObject2, const JPH::ContactManifold &inManifold )
+		JoltPhysicsCollisionInfo( JoltPhysicsObject *pObject1, JoltPhysicsObject *pObject2, const JPH::ContactManifold &inManifold, bool bStrongestImpact = false )
 			: m_CollisionPair{ pObject1, pObject2 }
 			// Slart: Note this negated vector, it is important, Portal 2 bouncy paint needs it negated otherwise things fly into the surface they hit
 			, m_SurfaceNormal( -Vector( inManifold.mWorldSpaceNormal.GetX(), inManifold.mWorldSpaceNormal.GetY(), inManifold.mWorldSpaceNormal.GetZ() ) )
@@ -850,9 +875,42 @@ private:
 			, m_bPlayerDriven0( ( pObject1->GetCallbackFlags() & CALLBACK_IS_PLAYER_CONTROLLER ) != 0 )
 			, m_bPlayerDriven1( ( pObject2->GetCallbackFlags() & CALLBACK_IS_PLAYER_CONTROLLER ) != 0 )
 		{
+			// Touch and friction retain their original first-point location.
+			if ( !bStrongestImpact )
+				return;
+
+			// A rotating face can have a separating first point and an approaching
+			// opposite edge. Represent the manifold by its strongest approaching
+			// point, keeping HitPos, HitSpeed and Speed from the same contact.
+			float bestApproach = -m_ContactSpeed.Dot( m_SurfaceNormal );
+			for ( uint32 i = 1; i < inManifold.mRelativeContactPointsOn1.size(); ++i )
+			{
+				const Vector speed = JoltToSource::Distance(
+					GetEffectivePointVelocity( pObject1, inManifold.GetWorldSpaceContactPointOn1( i ) ) -
+					GetEffectivePointVelocity( pObject2, inManifold.GetWorldSpaceContactPointOn2( i ) ) );
+				const float approach = -speed.Dot( m_SurfaceNormal );
+				if ( IsFiniteValue( approach ) && approach > bestApproach )
+				{
+					bestApproach = approach;
+					m_ContactSpeed = speed;
+					m_ContactPoint = JoltToSource::Distance( inManifold.GetWorldSpaceContactPointOn1( i ) );
+				}
+			}
 		}
 
 		JoltPhysicsContactPair m_CollisionPair;
+
+		bool IsFinite() const
+		{
+			for ( float value : { m_SurfaceNormal.x, m_SurfaceNormal.y, m_SurfaceNormal.z,
+				m_ContactPoint.x, m_ContactPoint.y, m_ContactPoint.z,
+				m_ContactSpeed.x, m_ContactSpeed.y, m_ContactSpeed.z,
+				m_Velocity0.GetX(), m_Velocity0.GetY(), m_Velocity0.GetZ(),
+				m_Velocity1.GetX(), m_Velocity1.GetY(), m_Velocity1.GetZ() } )
+				if ( !IsFiniteValue( value ) )
+					return false;
+			return true;
+		}
 
 		Vector m_SurfaceNormal = vec3_origin;
 		Vector m_ContactPoint  = vec3_origin;
@@ -992,12 +1050,17 @@ private:
 			// Highest approach speed first within a pair/substep, then stable shape
 			// and geometry keys. No addresses or worker IDs influence admission.
 			const auto &info = m_Data.GetInfo();
-			return std::make_tuple( m_nSubstep, info.m_PairKey, -m_Event.collisionSpeed,
-				info.m_SubShapeKey, info.m_ContactPoint.x, info.m_ContactPoint.y, info.m_ContactPoint.z,
-				info.m_SurfaceNormal.x, info.m_SurfaceNormal.y, info.m_SurfaceNormal.z,
-				info.m_ContactSpeed.x, info.m_ContactSpeed.y, info.m_ContactSpeed.z,
-				info.m_Velocity0.GetX(), info.m_Velocity0.GetY(), info.m_Velocity0.GetZ(),
-				info.m_Velocity1.GetX(), info.m_Velocity1.GetY(), info.m_Velocity1.GetZ() );
+			return std::make_tuple( m_nSubstep, info.m_PairKey, ~FloatOrderKey( m_Event.collisionSpeed ),
+				info.m_SubShapeKey, FloatOrderKey( info.m_ContactPoint.x ), FloatOrderKey( info.m_ContactPoint.y ), FloatOrderKey( info.m_ContactPoint.z ),
+				FloatOrderKey( info.m_SurfaceNormal.x ), FloatOrderKey( info.m_SurfaceNormal.y ), FloatOrderKey( info.m_SurfaceNormal.z ),
+				FloatOrderKey( info.m_ContactSpeed.x ), FloatOrderKey( info.m_ContactSpeed.y ), FloatOrderKey( info.m_ContactSpeed.z ),
+				FloatOrderKey( info.m_Velocity0.GetX() ), FloatOrderKey( info.m_Velocity0.GetY() ), FloatOrderKey( info.m_Velocity0.GetZ() ),
+				FloatOrderKey( info.m_Velocity1.GetX() ), FloatOrderKey( info.m_Velocity1.GetY() ), FloatOrderKey( info.m_Velocity1.GetZ() ) );
+		}
+
+		bool IsValidForDispatch() const
+		{
+			return m_Data.GetInfo().IsFinite() && IsFiniteValue( m_Event.collisionSpeed );
 		}
 		vcollisionevent_t			m_Event = {};
 		JoltPhysicsCollisionData	m_Data;
@@ -1021,6 +1084,15 @@ private:
 	struct JoltPhysicsEventTracker
 	{
 	public:
+		void CollectValid( std::vector< Data * > &events )
+		{
+			events.clear();
+			ForEach< false >( [&events]( Data &event )
+			{
+				if ( event.IsValidForDispatch() )
+					events.push_back( &event );
+			} );
+		}
 		template < typename... T >
 		void EmplaceBack( uint32 uThreadId, T&&... val)
 		{

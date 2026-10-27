@@ -15,7 +15,8 @@ def block(marker, semicolon=False):
     return source[start:end] + (';' if semicolon else '') + '\n'
 
 parts = [block('struct JoltPhysicsContactPair', True), 'class Contract { public:\n']
-for marker in ['static inline uint64_t MakeCacheKey', 'static Vector GetEffectiveVelocity',
+for marker in ['static uint32 FloatOrderKey', 'static bool IsFiniteValue', 'static bool IsOrdinaryImpact',
+               'static inline uint64_t MakeCacheKey', 'static Vector GetEffectiveVelocity',
                'static JPH::Vec3 GetEffectiveJoltVelocity', 'static JPH::Vec3 GetEffectivePointVelocity',
                'float StampPairCollisionTime', 'void AdvanceSimulationTime']:
     parts.append(block(marker))

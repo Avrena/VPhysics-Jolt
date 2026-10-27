@@ -10,6 +10,8 @@
 #include <cmath>
 #include <cstdio>
 #include <tuple>
+#include <cstring>
+#include <limits>
 #include <unordered_map>
 #include <vector>
 
@@ -100,6 +102,15 @@ int main()
         m.mRelativeContactPointsOn1[0]=JPH::Vec3(1,0,0);
         Contract::JoltPhysicsCollisionEvent angular({&a,&b,m},1);
         check(near(angular.m_Event.collisionSpeed,1/0.0254f),"angular point velocity contributes to approach");
+        m.mRelativeContactPointsOn1[0]=JPH::Vec3(-1,0,0);
+        m.mRelativeContactPointsOn1.push_back(JPH::Vec3(1,0,0));
+        m.mRelativeContactPointsOn2.push_back(JPH::Vec3(1,0,0));
+        Contract::JoltPhysicsCollisionInfo touch(&a,&b,m);
+        check(touch.m_ContactPoint.x<0,"touch and friction retain the first manifold point");
+        Contract::JoltPhysicsCollisionEvent edge({&a,&b,m,true},1);
+        Vector point; edge.m_Data.GetContactPoint(point);
+        check(near(edge.m_Event.collisionSpeed,1/0.0254f) && point.x>0,"approaching edge selected over separating first point");
+        m.mRelativeContactPointsOn1.pop_back(); m.mRelativeContactPointsOn2.pop_back();
         a.body->SetLinearVelocity(SourceToJolt::Distance({0,0,900}));
         a.body->SetAngularVelocity(JPH::Vec3::sZero());
         Contract::JoltPhysicsCollisionEvent separating({&a,&b,m},1);
@@ -130,6 +141,34 @@ int main()
         check(seen.empty(),"drained tracker is empty");
         Contract::JoltPhysicsCollisionEvent later(info,2);
         check(event.SortKey()<later.SortKey(),"substep ordering precedes worker ordering");
+        check(!Contract::IsOrdinaryImpact(0,0) && !Contract::IsOrdinaryImpact(-100,0),"zero floor rejects stationary and separating contacts");
+        check(!Contract::IsOrdinaryImpact(0.005f,0) && Contract::IsOrdinaryImpact(0.02f,0),"stationary epsilon separates numerical noise from approach");
+        check(!Contract::IsOrdinaryImpact(49,50) && Contract::IsOrdinaryImpact(50,50),"configured floor remains an additional bound");
+        check(!Contract::IsOrdinaryImpact(13.7f,20) && Contract::IsOrdinaryImpact(20,20),"configured floor rejects typical substep gravity approach");
+        const float nan=std::numeric_limits<float>::quiet_NaN(), inf=std::numeric_limits<float>::infinity();
+        Contract::JoltPhysicsEventTracker<Contract::JoltPhysicsCollisionEvent> invalidQueue;
+        invalidQueue.EmplaceBack(0,info,1);
+        for(float bad : {nan,inf,-inf})
+        {
+            a.body->SetLinearVelocity(JPH::Vec3(bad,0,0));
+            Contract::JoltPhysicsCollisionInfo invalid(&a,&b,m);
+            invalidQueue.EmplaceBack(63,invalid,1);
+            check(!invalid.IsFinite(),"non-finite body velocity rejected at snapshot");
+            check(!Contract::IsOrdinaryImpact(bad,0),"non-finite approach cannot pass gate");
+        }
+        std::vector<Contract::JoltPhysicsCollisionEvent*> admitted;
+        invalidQueue.CollectValid(admitted);
+        std::sort(admitted.begin(),admitted.end(),[](auto *x,auto *y){return x->SortKey()<y->SortKey();});
+        int dispatched=0;
+        for(auto *e:admitted) { check(e->IsValidForDispatch(),"dispatch receives only finite event data"); ++dispatched; }
+        check(dispatched==1,"queue filtering drops NaN and infinity before dispatch");
+        std::vector<uint32_t> totalKeys;
+        for(float f : {nan,inf,-inf,-0.0f,0.0f,-100.0f,100.0f}) totalKeys.push_back(Contract::FloatOrderKey(f));
+        std::sort(totalKeys.begin(),totalKeys.end());
+        check(std::is_sorted(totalKeys.begin(),totalKeys.end()),"integer float keys remain ordered with NaN and infinity");
+        auto garbage=event;
+        garbage.m_Event.collisionSpeed=nan;
+        check(!garbage.IsValidForDispatch(),"corrupt event speed rejected before sorting");
         bi.DestroyBody(a.GetBodyID()); bi.DestroyBody(b.GetBodyID());
     }
     JPH::UnregisterTypes(); delete JPH::Factory::sInstance; JPH::Factory::sInstance=nullptr;
