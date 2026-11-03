@@ -161,14 +161,23 @@ JoltPhysicsObject::~JoltPhysicsObject()
 
 	RemoveShadowController();
 
-	// Josh:
-	// Iterate over this in reverse as we could remove a listener from inside this callback
-	for ( int i = m_destroyedListeners.Count() - 1; i >= 0; i-- )
-		m_destroyedListeners[ i ]->OnJoltPhysicsObjectDestroyed( this );
+	// A constraint listener may invoke ConstraintBroken, whose game callback can
+	// remove another listener. Consume this entry before calling it, then re-read
+	// the vector instead of retaining an index across that mutation.
+	while ( m_destroyedListeners.Count() > 0 )
+	{
+		const int index = m_destroyedListeners.Count() - 1;
+		IJoltObjectDestroyedListener *listener = m_destroyedListeners[ index ];
+		m_destroyedListeners.Remove( index );
+		listener->OnJoltPhysicsObjectDestroyed( this );
+	}
 
 	m_pEnvironment->RemoveDirtyStaticBody( GetBodyID() );
 	m_pEnvironment->MarkObjectListDirty();
 
+	// Destruction callbacks can ask ShouldCollide again after the environment
+	// invalidated this object. Remove those entries before Jolt can reuse its ID.
+	m_pEnvironment->GetContactListener()->InvalidShouldCollideCache( this );
 	JPH::BodyInterface& bodyInterface = m_pPhysicsSystem->GetBodyInterfaceNoLock();
 	bodyInterface.DestroyBody( GetBodyID() );
 }

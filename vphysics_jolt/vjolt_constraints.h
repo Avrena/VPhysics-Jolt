@@ -96,6 +96,15 @@ public:
 
 	bool CheckBroken();
 
+	// Runtime-only: coalesce repeated deletion requests before the queue drains.
+	bool MarkForDelete()
+	{
+		if ( m_bMarkedForDelete )
+			return false;
+		m_bMarkedForDelete = true;
+		return true;
+	}
+
 private:
 
 	void HardenLengthSpring();
@@ -127,4 +136,5 @@ private:
 	float						m_SourceTorqueLimit = 0.0f;
 	float						m_ConstraintStrength = 1.0f;
 	float						m_BodyMassScale[2] = { 1.0f, 1.0f };
+	bool m_bMarkedForDelete = false;
 };

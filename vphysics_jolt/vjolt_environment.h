@@ -219,6 +219,7 @@ private:
 
 	void RemoveBodyAndDeleteObject( JoltPhysicsObject* pObject );
 	void DeleteDeadObjects();
+	void DestroyEnvironmentObjects();
 
 	// Post-step sweep: park any active body with a non-finite or runaway transform/velocity
 	// so its AABB cannot poison the broadphase tree. See vjolt_util.h for the rationale.
@@ -233,6 +234,8 @@ private:
 	void HandleDebugDumpingEnvironment( void* pReturnAddress );
 
 	bool m_bSimulating = false;
+	bool m_bDeletingDeadObjects = false;
+	bool m_bDestroyingEnvironmentObjects = false;
 	bool m_bEnableDeleteQueue = false;
 	bool m_bWakeObjectsOnConstraintDeletion = false;
 	bool m_bOptimizedBroadPhase = false;
