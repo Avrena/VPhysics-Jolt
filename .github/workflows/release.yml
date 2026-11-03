@@ -132,6 +132,12 @@ jobs:
     - name: Install Dependencies
       run: |
         dpkg --add-architecture i386
+        # Bullseye security packages moved to the archive after LTS; retain the build ABI.
+        for apt_source in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+          if [ -f "$apt_source" ]; then
+            sed -i 's|deb\.debian\.org/debian-security|archive.debian.org/debian-security|g' "$apt_source"
+          fi
+        done
         apt update
         apt install -y build-essential git libstdc++6:i386 gcc-multilib g++-multilib zip
 
@@ -194,6 +200,12 @@ jobs:
     - name: Install Dependencies
       run: |
         dpkg --add-architecture i386
+        # Bullseye security packages moved to the archive after LTS; retain the build ABI.
+        for apt_source in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+          if [ -f "$apt_source" ]; then
+            sed -i 's|deb\.debian\.org/debian-security|archive.debian.org/debian-security|g' "$apt_source"
+          fi
+        done
         apt update
         apt install -y build-essential git libstdc++6:i386 gcc-multilib g++-multilib zip
 
