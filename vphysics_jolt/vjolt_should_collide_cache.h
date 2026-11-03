@@ -29,7 +29,7 @@ public:
 	// At capacity, still return the game's answer but do not cache a new pair.
 	// Invalidating/deleting bodies makes space without evicting unrelated pairs.
 	explicit VJoltShouldCollideCache( std::size_t maxEntries = 100000 )
-		: m_MaxEntries( std::min( maxEntries, std::size_t( std::numeric_limits<std::uint32_t>::max() ) ) )
+		: m_MaxEntries( (std::min)( maxEntries, std::size_t( (std::numeric_limits<std::uint32_t>::max)() ) ) )
 	{
 	}
 
