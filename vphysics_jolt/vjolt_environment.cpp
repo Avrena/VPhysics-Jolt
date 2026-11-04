@@ -287,28 +287,6 @@ JoltPhysicsEnvironment::JoltPhysicsEnvironment()
 	m_PhysicsSystem.AddStepListener( &m_ContactListener );
 }
 
-JoltPhysicsEnvironment::~JoltPhysicsEnvironment()
-{
-	// Clear any pending dead bodies.
-	DeleteDeadObjects();
-
-	// Clear out all our bodies.
-	m_PhysicsSystem.GetBodies( m_CachedBodies );
-
-	const int nCount = int ( m_CachedBodies.size() );
-	for ( int i = 0; i < nCount; i++ )
-	{
-		JPH::Body *pBody = m_PhysicsSystem.GetBodyLockInterfaceNoLock().TryGetBody( m_CachedBodies[ i ] );
-		JoltPhysicsObject *pObject = reinterpret_cast< JoltPhysicsObject * >( pBody->GetUserData() );
-		RemoveBodyAndDeleteObject( pObject );
-	}
-
-	m_PhysicsSystem.RemoveStepListener( &m_ContactListener );
-	m_PhysicsSystem.RemoveStepListener( m_pDragController );
-	delete m_pDragController;
-	m_pDragController = nullptr;
-}
-
 //-------------------------------------------------------------------------------------------------
 
 void JoltPhysicsEnvironment::SetDebugOverlay( CreateInterfaceFn debugOverlayFactory )
@@ -487,30 +465,6 @@ IPhysicsObject *JoltPhysicsEnvironment::CreateSphereObject( float radius, int ma
 	bodyInterface.AddBody( pBody->GetID(), JPH::EActivation::DontActivate );
 
 	return new JoltPhysicsObject( pBody, this, isStatic, materialIndex, &params );
-}
-
-void JoltPhysicsEnvironment::DestroyObject( IPhysicsObject *pObject )
-{
-	if ( !pObject )
-		return;
-
-	JoltPhysicsObject *pJoltObject = static_cast<JoltPhysicsObject *>( pObject );
-
-	if ( pJoltObject->GetCallbackFlags() & CALLBACK_MARKED_FOR_DELETE )
-	{
-		// Object deleted twice.
-		VJoltAssertMsg( 0, "Object deleted twice.\n" );
-		return;
-	}
-
-	pJoltObject->AddCallbackFlags( CALLBACK_MARKED_FOR_DELETE );
-
-	// If we are simulating or the delete queue is enabled, add it to the delete queue.
-	// Otherwise, just delete it now.
-	if ( m_bSimulating || m_bEnableDeleteQueue )
-		m_pDeadObjects.push_back( pJoltObject );
-	else
-		RemoveBodyAndDeleteObject( pJoltObject );
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -744,37 +698,6 @@ IPhysicsConstraint *JoltPhysicsEnvironment::CreateLengthConstraint( IPhysicsObje
 	JoltPhysicsConstraint *pConstraint = new JoltPhysicsConstraint( this, pReferenceObject, pAttachedObject );
 	pConstraint->InitialiseLength( pGroup, length );
 	return pConstraint;
-}
-
-void JoltPhysicsEnvironment::DestroyConstraint( IPhysicsConstraint *pConstraint )
-{
-	if ( !pConstraint )
-		return;
-
-	JoltPhysicsConstraint *pJoltConstraint = static_cast< JoltPhysicsConstraint * >( pConstraint );
-	if ( m_bWakeObjectsOnConstraintDeletion )
-	{
-		IPhysicsObject *pObjectRef = pJoltConstraint->GetReferenceObject();
-		if ( pObjectRef )
-			pObjectRef->Wake();
-
-		IPhysicsObject *pObjectAtt = pJoltConstraint->GetAttachedObject();
-		if ( pObjectAtt )
-			pObjectAtt->Wake();
-	}
-
-	// Suprisingly, the quick delete thing only affects whether we wake
-	// constraints or not.
-	// It does not affect whether it goes in the delete queue.
-	if ( m_bSimulating )
-	{
-		pJoltConstraint->Deactivate();
-		m_pDeadConstraints.push_back( pJoltConstraint );
-	}
-	else
-	{
-		delete pJoltConstraint;
-	}
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -1208,6 +1131,7 @@ bool JoltPhysicsEnvironment::TransferObject( IPhysicsObject *pObject, IPhysicsEn
 	JoltPhysicsObject *pJoltObject = static_cast< JoltPhysicsObject * >( pObject );
 	JoltPhysicsEnvironment *pJoltEnv = static_cast< JoltPhysicsEnvironment * >( pDestinationEnvironment );
 
+	m_ContactListener.InvalidShouldCollideCache( pJoltObject );
 	JPH::BodyInterface &bodyInterface = m_PhysicsSystem.GetBodyInterfaceNoLock();
 	bodyInterface.RemoveBody( pJoltObject->GetBodyID() );
 	m_bObjectListDirty = true;
@@ -1222,18 +1146,6 @@ bool JoltPhysicsEnvironment::TransferObject( IPhysicsObject *pObject, IPhysicsEn
 	pJoltObject->UpdateEnvironment( pJoltEnv );
 
 	return true;
-}
-
-//-------------------------------------------------------------------------------------------------
-
-void JoltPhysicsEnvironment::CleanupDeleteList()
-{
-	DeleteDeadObjects();
-}
-
-void JoltPhysicsEnvironment::EnableDeleteQueue( bool enable )
-{
-	m_bEnableDeleteQueue = enable;
 }
 
 //-------------------------------------------------------------------------------------------------
@@ -1702,25 +1614,6 @@ void JoltPhysicsEnvironment::RestorePredictedSimulation()
 
 //-------------------------------------------------------------------------------------------------
 
-void JoltPhysicsEnvironment::DestroyCollideOnDeadObjectFlush( CPhysCollide *pCollide )
-{
-	// If this collide is part of a dead object, add it to a queue to delete.
-	for ( JoltPhysicsObject *pObject : m_pDeadObjects )
-	{
-		if ( pObject->GetCollide() == pCollide )
-		{
-			if ( !VectorContains( m_pDeadObjectCollides, pCollide ) )
-				m_pDeadObjectCollides.push_back( pCollide );
-			return;
-		}
-	}
-
-	// Otherwise, just delete it now.
-	JoltPhysicsCollision::GetInstance().DestroyCollide( pCollide );
-}
-
-//-------------------------------------------------------------------------------------------------
-
 #if GAME_GMOD
 void JoltPhysicsEnvironment::SetGModObjectEventHandler( IGModPhysicsObjectEvent *pGModObjectEvent )
 {
@@ -1764,31 +1657,6 @@ void JoltPhysicsEnvironment::AddDirtyStaticBody( const JPH::BodyID &id )
 void JoltPhysicsEnvironment::RemoveDirtyStaticBody( const JPH::BodyID &id )
 {
 	Erase( m_DirtyStaticBodies, id );
-}
-
-//-------------------------------------------------------------------------------------------------
-
-void JoltPhysicsEnvironment::RemoveBodyAndDeleteObject( JoltPhysicsObject *pObject )
-{
-	JPH::BodyInterface &bodyInterface = m_PhysicsSystem.GetBodyInterfaceNoLock();
-	bodyInterface.RemoveBody( pObject->GetBodyID() );
-	m_bObjectListDirty = true;
-	delete pObject;
-}
-
-void JoltPhysicsEnvironment::DeleteDeadObjects()
-{
-	for ( JoltPhysicsConstraint *pConstraint : m_pDeadConstraints )
-		delete pConstraint;
-	m_pDeadConstraints.clear();
-
-	for ( CPhysCollide *pCollide : m_pDeadObjectCollides )
-		JoltPhysicsCollision::GetInstance().DestroyCollide( pCollide );
-	m_pDeadObjectCollides.clear();
-
-	for ( JoltPhysicsObject *pObject : m_pDeadObjects )
-		RemoveBodyAndDeleteObject( pObject );
-	m_pDeadObjects.clear();
 }
 
 //-------------------------------------------------------------------------------------------------

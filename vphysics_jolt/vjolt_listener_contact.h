@@ -4,8 +4,10 @@
 #include "vjolt_controller_fluid.h"
 #include "vjolt_surfaceprops.h"
 #include "vjolt_contact_recovery.h"
+#include "vjolt_should_collide_cache.h"
 #include "ankerl/unordered_dense.h"
 #include <vector>
+#include <atomic>
 #include <algorithm>
 #include <tuple>
 #include <cstring>
@@ -350,32 +352,14 @@ public:
 		return (uint64_t(keyA) << 32) | keyB;
 	}
 
-	// NCG: only drop cache entries that involve pObject0 rather than nuking the whole
-	// map. A full clear forces every unrelated pair to re-run the locked (Lua-capable)
-	// ShouldCollide on its next contact -- a stall storm on the collision-group changes
-	// that are constant on a ragdoll-heavy server. The size cap bounds accumulation of
-	// stale entries for destroyed bodies (recycled BodyIDs are never revisited).
+	// Keep nullptr's existing full-clear semantics. Individual invalidation
+	// only visits this body's pairs and prevents callback-time stale reinsertion.
 	void InvalidShouldCollideCache( JoltPhysicsObject *pObject0 )
 	{
-		std::unique_lock<std::shared_mutex> mapLock( m_ShouldCollideCacheLock );
-
-		if ( !pObject0 || m_ShouldCollideCache.size() > 100000 )
-		{
-			m_ShouldCollideCache.clear();
-			return;
-		}
-
-		const uint32_t nKey = pObject0->GetBodyID().GetIndexAndSequenceNumber();
-		std::vector<uint64_t> keysToErase;
-		for ( const auto &kv : m_ShouldCollideCache )
-		{
-			const uint64_t k = kv.first;
-			if ( uint32_t( k >> 32 ) == nKey || uint32_t( k & 0xFFFFFFFFu ) == nKey )
-				keysToErase.push_back( k );
-		}
-
-		for ( const uint64_t k : keysToErase )
-			m_ShouldCollideCache.erase( k );
+		if ( pObject0 )
+			m_ShouldCollideCache.Invalidate( pObject0->GetBodyID().GetIndexAndSequenceNumber() );
+		else
+			m_ShouldCollideCache.Clear();
 	}
 
 	bool ShouldCollide( JoltPhysicsObject *pObject0, JoltPhysicsObject *pObject1 )
@@ -391,7 +375,7 @@ public:
 		if ( ( pObject1->GetCallbackFlags() & CALLBACK_ENABLING_COLLISION ) && ( pObject0->GetCallbackFlags() & CALLBACK_MARKED_FOR_DELETE ) )
 			return false;
 
-		if ( !m_pGameSolver )
+		if ( !m_pGameSolver.load( std::memory_order_acquire ) )
 			return true;
 
 		// Josh:
@@ -400,36 +384,26 @@ public:
 		if ( !PreEmptGameShouldCollide( pObject0, pObject1 ) )
 			return false;
 
-		// RaphaelIT7:
-		// Let's check the cache
-		// We cache it to prevent expensive locks as ShouldCollide is not thread safe (In GMod it can call back to lua)
-		uint64_t nCacheKey = MakeCacheKey( pObject0, pObject1 );
-		{
-			std::shared_lock<std::shared_mutex> lock( m_ShouldCollideCacheLock );
-			auto it = m_ShouldCollideCache.find( nCacheKey );
-			if ( it != m_ShouldCollideCache.end() )
-				return it->second;
-		}
+		const uint32_t bodyKey0 = pObject0->GetBodyID().GetIndexAndSequenceNumber();
+		const uint32_t bodyKey1 = pObject1->GetBodyID().GetIndexAndSequenceNumber();
+		auto lookup = m_ShouldCollideCache.Find( bodyKey0, bodyKey1 );
+		if ( lookup.found )
+			return lookup.shouldCollide;
 
-		// Actually ask the game now, locking both bodies so they cannot have
-		// concurrent ShouldCollide calls.
-		//JoltPhysicsObjectPairLock lock( pObject0->GetCollisionTestLock(), pObject1->GetCollisionTestLock() );
+		// GMod's solver can enter Lua. Keep the existing serialised callback
+		// section, then recheck in case another worker populated this pair.
 		std::unique_lock lock( m_ShouldCollideLock );
-
-		// RaphaelIT7: We check again since a thread may have done the work for us
-		{
-			// We must lock due to InvalidShouldCollideCache (Though it probably should never be called from outside while Simulating?)
-			std::shared_lock<std::shared_mutex> lock( m_ShouldCollideCacheLock );
-			auto it = m_ShouldCollideCache.find( nCacheKey );
-			if ( it != m_ShouldCollideCache.end() )
-				return it->second;
-		}
-
-		bool bCollide = m_pGameSolver->ShouldCollide( pObject0, pObject1, pObject0->GetGameData(), pObject1->GetGameData() );
-
-		std::unique_lock<std::shared_mutex> mapLock( m_ShouldCollideCacheLock );
-		m_ShouldCollideCache[ nCacheKey ] = bCollide;
-
+		lookup = m_ShouldCollideCache.Find( bodyKey0, bodyKey1 );
+		if ( lookup.found )
+			return lookup.shouldCollide;
+		IPhysicsCollisionSolver *pSolver = m_pGameSolver.load( std::memory_order_acquire );
+		if ( !pSolver )
+			return true;
+		const bool bCollide = pSolver->ShouldCollide( pObject0, pObject1,
+			pObject0->GetGameData(), pObject1->GetGameData() );
+		// A re-entrant invalidation/replacement or capacity limit only prevents
+		// caching. This invocation must still return the game's actual answer.
+		m_ShouldCollideCache.StoreIfUnchanged( lookup, bCollide );
 		return bCollide;
 	}
 
@@ -498,28 +472,32 @@ public:
 
 	IPhysicsCollisionSolver *GetGameSolver()
 	{
-		return m_pGameSolver;
+		return m_pGameSolver.load( std::memory_order_acquire );
 	}
 
 	void SetGameSolver( IPhysicsCollisionSolver *pSolver )
 	{
-		m_pGameSolver = pSolver;
+		// Publish before clearing: a lookup after the clear sees the new solver.
+		// Do not acquire the callback mutex here; a game callback may replace its
+		// solver re-entrantly. The old result is rejected by the cache epoch.
+		m_pGameSolver.store( pSolver, std::memory_order_release );
+		m_ShouldCollideCache.Clear();
 	}
 
-	// Returns true if either object was freed earlier in THIS flush by a
-	// re-entrant game callback (see FlushCallbacks). Shared by every dispatch loop so the same
-	// use-after-free class is closed on collision, friction, touch, trigger and fluid events -- not
-	// just the collision Pre/Post pair. Cheap: one uint32 compare unless a mid-flush destroy actually
-	// happened this flush (g_pObjects membership lookups only on that slow path). Always defined
-	// (returns false when !GAME_GMOD) so the call sites need no #if.
-	bool ShouldSkipFreedEvent( [[maybe_unused]] JoltPhysicsObject *pObj1, [[maybe_unused]] JoltPhysicsObject *pObj2 )
+	// Callbacks can mark another object's game entity for deletion while its
+	// wrapper stays queued until simulation ends. Skip later events for either
+	// marked endpoint. Check the registry before dereferencing if a callback
+	// actually freed a wrapper; keep an already-started Pre/Post pair matched.
+	bool ShouldSkipFreedEvent( JoltPhysicsObject *pObj1, JoltPhysicsObject *pObj2 )
 	{
+		if ( !pObj1 || !pObj2 )
+			return true;
 	#if GAME_GMOD
 		if ( g_JoltObjectDestroyGeneration != m_nFlushDestroyGenStart &&
 			 ( !IsValidPhyiscsObject( pObj1 ) || !IsValidPhyiscsObject( pObj2 ) ) )
 			return true;
 	#endif
-		return false;
+		return ( ( pObj1->GetCallbackFlags() | pObj2->GetCallbackFlags() ) & CALLBACK_MARKED_FOR_DELETE ) != 0;
 	}
 
 	// Jolt completes step listeners before collision jobs. Capture the substep
@@ -577,11 +555,10 @@ public:
 			JoltPhysicsObject *pObj1 = event.m_Data.GetPair().pObject1;
 			JoltPhysicsObject *pObj2 = event.m_Data.GetPair().pObject2;
 
-			// A game callback dispatched earlier in this same flush can UTIL_Remove an entity,
-			// synchronously freeing its JoltPhysicsObject (re-entrant CleanupDeleteList). Such an
-			// object is already absent from g_pObjects (Unregistered at the top of the dtor), so
-			// skip the event rather than dereference -- or hand the engine -- a dangling pointer.
-			// The same guard runs on every sibling loop below (touch/trigger/friction/fluid).
+			// An earlier callback can remove a game entity while its marked physics wrapper
+			// remains queued until simulation ends. Skip later events for that endpoint.
+			// The guard also checks the registry before dereferencing a genuinely freed wrapper,
+			// and runs on every sibling loop below (touch/trigger/friction/fluid).
 			if ( ShouldSkipFreedEvent( pObj1, pObj2 ) )
 				return;
 
@@ -678,6 +655,9 @@ public:
 			const int nMtl2Hit = nMtl1;
 		#endif
 			m_pGameListener->Friction( pObj1, event.m_flEnergy, nMtl1, nMtl1Hit, &event.m_Data );
+			// Friction callbacks are independent; the first may remove either side.
+			if ( ShouldSkipFreedEvent( pObj1, pObj2 ) )
+				return;
 			m_pGameListener->Friction( pObj2, event.m_flEnergy, nMtl2, nMtl2Hit, &event.m_Data );
 		});
 
@@ -827,7 +807,7 @@ private:
 	const JPH::PhysicsSystem &m_PhysicsSystem;
 
 	IPhysicsCollisionEvent	*m_pGameListener = nullptr;
-	IPhysicsCollisionSolver *m_pGameSolver = nullptr;
+	std::atomic<IPhysicsCollisionSolver *> m_pGameSolver = nullptr;
 
 #if GAME_GMOD
 	// Snapshotted at the top of FlushCallbacks and read by the dispatch lambdas, so the
@@ -837,8 +817,7 @@ private:
 #endif
 
 	std::mutex m_ShouldCollideLock;
-	std::shared_mutex m_ShouldCollideCacheLock;
-	ankerl::unordered_dense::map< uint64_t, bool > m_ShouldCollideCache;
+	VJoltShouldCollideCache m_ShouldCollideCache;
 
 	// Per-pair last-collision-event stamps for deltaCollisionTime (see StampPairCollisionTime).
 	ankerl::unordered_dense::map< uint64_t, uint64_t > m_LastCollisionTime;

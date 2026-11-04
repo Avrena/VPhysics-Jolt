@@ -1,0 +1,30 @@
+name: Linux x64 native regressions
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  regressions:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizers: ['OFF', 'ON']
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+      - name: Configure native fixtures
+        run: >-
+          cmake -S tests -B build/native-regressions
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DVJOLT_SANITIZERS=${{ matrix.sanitizers }}
+      - name: Build native fixtures
+        run: cmake --build build/native-regressions --parallel 2
+      - name: Run native regressions
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: ctest --test-dir build/native-regressions --output-on-failure
